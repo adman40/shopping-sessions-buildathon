@@ -239,7 +239,7 @@ where
         }
     }
 
-    pending.sort_by_key(|event| (event.person, event.timestamp_ms));
+    pending.sort_unstable_by_key(|event| (event.person, event.timestamp_ms));
 
     let mut batch = CompactEventBatch {
         records: Vec::with_capacity(pending.len()),
@@ -309,13 +309,13 @@ where
     if product_id.is_empty() {
         return Ok(Err(DropReason::EmptyProductId));
     }
-    let resolved_product = products.resolve_product(product_id);
 
     let payload = if kind == EventKind::Purchase {
         let price_bytes = resolve(row.price_cents, arena, "price_cents")?;
         let Some(price_cents) = parse_price(price_bytes) else {
             return Ok(Err(DropReason::InvalidPrice));
         };
+        let resolved_product = products.resolve_product(product_id);
         EventPayload::purchase(resolved_product.category, price_cents).ok_or_else(|| {
             PipelineError::new(PipelineErrorKind::Invariant, "validated price rejected")
         })?
