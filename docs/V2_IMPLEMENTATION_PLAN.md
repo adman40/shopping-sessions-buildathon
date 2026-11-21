@@ -152,7 +152,7 @@ Any contract change requires fixture tests and an updated entry in the decision 
 
 **Deliverables:**
 - Staged output writer for `user_daily/part-0.parquet` and `campaign_daily/part-0.parquet`.
-- `DATE`, signed integer, UTF-8, and nullable `top_category` schema guarantees.
+- `DATE`, `INT64`, and UTF-8 logical types; starter-compatible OPTIONAL physical fields; only `user_daily.top_category` values may be null.
 - Zstd-1/128K-row-group initial configuration and readback/schema test.
 
 **Acceptance:** empty and non-empty output cases pass every fixture; output contains no unexpected visible files; no writes occur outside `/output` and `/scratch`.

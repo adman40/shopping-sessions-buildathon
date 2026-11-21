@@ -2,6 +2,7 @@
 members = [
     "crates/app",
     "crates/domain",
+    "crates/output",
     "crates/parser",
     "crates/reduce",
     "crates/sweep",
@@ -16,6 +17,9 @@ license = "MIT"
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+arrow-array = "56.2"
+arrow-schema = "56.2"
+parquet = { version = "56.2", features = ["arrow", "zstd"] }
 shopping-sessions-domain = { path = "crates/domain" }
 
 [workspace.lints.rust]
