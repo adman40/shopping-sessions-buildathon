@@ -17,4 +17,3 @@ Every future contract change requires a focused contract test and an entry here.
 - Deterministic-repeat comparison is semantic rather than raw Parquet bytes because physical encodings and metadata are not scorer-visible and may vary while the required table is identical.
 - Randomized differential tests use the published generator's smallest supported dataset of 1,000 events and compare against the unchanged V1 Polars pipeline.
 - The `app` crate is a fail-closed submission-shell stub only.
-- Parsing, identity construction, reduction, sweeping, output writing, orchestration, and optimization remain unimplemented for their later slices.
