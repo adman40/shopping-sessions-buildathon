@@ -2,7 +2,7 @@
 
 ## Goal and non-goals
 
-V2 replaces the scored Polars data path with a compact Rust pipeline. It keeps the current `main` branch as the known-good, submit-ready Polars baseline. All V2 work starts on `v2-rust-plan` and is submitted only after it passes the same gates.
+V2 replaces the scored Polars data path with a compact Rust pipeline. It keeps the current `main` branch as the known-good, submit-ready Polars baseline. Implementation slices branch from the frozen, published `v2/slice0-contracts` contract and are submitted only after they pass the same gates.
 
 The objective is a correct pipeline with a measured x86-64 Linux runtime below 150 seconds, leaving margin below the 180-second limit. The research estimate is 114 seconds; that is a planning hypothesis, not a target we assume is achieved.
 
@@ -152,7 +152,7 @@ Any contract change requires fixture tests and an updated entry in the decision 
 
 **Deliverables:**
 - Staged output writer for `user_daily/part-0.parquet` and `campaign_daily/part-0.parquet`.
-- `DATE`, signed integer, UTF-8, and nullable `top_category` schema guarantees.
+- `DATE`, `INT64`, and UTF-8 logical types; starter-compatible OPTIONAL physical fields; only `user_daily.top_category` values may be null.
 - Zstd-1/128K-row-group initial configuration and readback/schema test.
 
 **Acceptance:** empty and non-empty output cases pass every fixture; output contains no unexpected visible files; no writes occur outside `/output` and `/scratch`.
