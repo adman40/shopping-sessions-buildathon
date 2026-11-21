@@ -71,12 +71,6 @@ impl RecordOrderer for StablePersonTimeOrder {
             let right_record = records[*right];
             (left_record.person, left_record.timestamp_ms)
                 .cmp(&(right_record.person, right_record.timestamp_ms))
-                .then_with(|| {
-                    clicks
-                        .click_id(*left)
-                        .unwrap_or_default()
-                        .cmp(clicks.click_id(*right).unwrap_or_default())
-                })
         });
 
         let mut counters = SortCounters {
