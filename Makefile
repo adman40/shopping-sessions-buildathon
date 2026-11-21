@@ -38,11 +38,11 @@ V2_ANSWER ?= dev-answer
 
 .PHONY: v2-build v2-test v2-dev v2-differential v2-benchmark
 
-## Build the Slice 0 V2 Rust submission shell
+## Build the V2 Rust submission shell
 v2-build:
 	docker buildx build --platform $(PLATFORM) --load -f v2/Dockerfile -t $(V2_IMAGE) .
 
-## Compile, test, format-check, and lint the frozen Rust contracts
+## Test the V2 workspace and harness, then check Rust formatting and lints
 v2-test:
 	cargo test --locked --manifest-path v2/Cargo.toml
 	cargo fmt --all --manifest-path v2/Cargo.toml --check

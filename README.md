@@ -4,7 +4,7 @@ A complete Polars baseline for the Shopping Sessions Buildathon. It builds a `li
 
 If this starter and `rules.md` ever disagree, `rules.md` wins. Ask the organizers if `rules.md` leaves you unsure.
 
-V2 Rust work is isolated under `v2/` on V2-prefixed branches. See `v2/README.md` for the frozen Slice 0 contracts and correctness-gated benchmark; the root Dockerfile and Python pipeline remain the V1 baseline.
+The V2 Rust implementation lives under `v2/`, with supporting commands in `scripts/` and `Makefile`; development stays on V2-prefixed branches. See `v2/README.md` for the frozen Slice 0 contracts, Slice 2 identity graph, and correctness-gated benchmark. The root Dockerfile and Python pipeline remain the V1 baseline.
 
 ## Iteration workflow
 
