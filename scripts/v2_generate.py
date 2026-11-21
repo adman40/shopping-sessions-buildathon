@@ -4,22 +4,20 @@
 import argparse
 import json
 from pathlib import Path
-import shlex
 import subprocess
 import sys
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--generator", default="generate", help="generator command, shell-quoted")
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--events", type=int, required=True)
     parser.add_argument("--clicks", type=int, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--threads", type=int)
     args = parser.parse_args()
-    command = shlex.split(args.generator) + [
-        "--seed", str(args.seed), "--events", str(args.events),
+    command = [
+        "generate", "--seed", str(args.seed), "--events", str(args.events),
         "--clicks", str(args.clicks), "--output", str(args.output),
     ]
     if args.threads is not None:

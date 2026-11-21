@@ -55,8 +55,8 @@ v2-dev:
 
 ## Compare randomized small candidate outputs with the V1 Polars oracle
 v2-differential:
-	python3 scripts/v2_differential.py --candidate '$(V2_CANDIDATE)'
+	IMAGE=$(V2_IMAGE) python3 scripts/v2_differential.py --candidate '$(V2_CANDIDATE)'
 
 ## Report timing only after every V2 correctness and telemetry gate passes
 v2-benchmark:
-	python3 scripts/v2_benchmark.py --candidate '$(V2_CANDIDATE)' --fixtures $(FIXTURES) --dev-data $(V2_DEV) --dev-answer $(V2_ANSWER)
+	IMAGE=$(V2_IMAGE) python3 scripts/v2_benchmark.py --candidate '$(V2_CANDIDATE)' --fixtures $(FIXTURES) --dev-data $(V2_DEV) --dev-answer $(V2_ANSWER)

@@ -34,12 +34,6 @@ def execute(command, data, output, label):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--candidate", required=True, help="candidate command, shell-quoted")
-    parser.add_argument(
-        "--oracle",
-        default=f"{shlex.quote(sys.executable)} pipeline/pipeline.py",
-        help="V1 oracle command, shell-quoted",
-    )
-    parser.add_argument("--generator", default="generate", help="generator command, shell-quoted")
     parser.add_argument("--seeds", type=int, default=10)
     parser.add_argument("--first-seed", type=int, default=1)
     parser.add_argument("--events", type=int, default=1_000)
@@ -49,8 +43,9 @@ def main():
         parser.error("seeds must be positive, events at least 1000, and clicks nonnegative")
 
     candidate = shlex.split(args.candidate)
-    oracle = shlex.split(args.oracle)
-    generator = shlex.split(args.generator)
+    oracle_path = Path(__file__).resolve().parents[1] / "pipeline" / "pipeline.py"
+    oracle = [sys.executable, str(oracle_path)]
+    generator = ["generate"]
     compare = Path(__file__).with_name("compare.py")
     with tempfile.TemporaryDirectory(prefix="v2-differential-") as temporary:
         root = Path(temporary)

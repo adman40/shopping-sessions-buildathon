@@ -3,6 +3,7 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -54,46 +55,113 @@ class BenchmarkContracts(unittest.TestCase):
         self.assertNotIn("TIMING", str(failure.exception))
         self.assertNotIn("0.001", str(failure.exception))
 
-    def test_telemetry_requires_all_phases_and_counters(self):
+    def test_docker_wrapper_uses_caller_owned_scratch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            output = root / "output"
+            scratch = root / "scratch"
+            fake_bin = root / "bin"
+            data.mkdir()
+            scratch.mkdir()
+            fake_bin.mkdir()
+            docker = fake_bin / "docker"
+            docker.write_text(
+                """#!/bin/sh
+set -eu
+scratch=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-v" ]; then
+    shift
+    case "$1" in
+      *:/scratch:z) scratch=${1%:/scratch:z} ;;
+    esac
+  fi
+  shift
+done
+test -n "$scratch"
+printf spill > "$scratch/spill.bin"
+printf '{}\\n' > "$scratch/v2-telemetry.json"
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            environment = dict(
+                os.environ,
+                PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                SCRATCH_DIR=str(scratch),
+                V2_TELEMETRY_PATH=str(scratch / "telemetry.json"),
+            )
+            process = subprocess.run(
+                [str(ROOT / "v2" / "docker_run.sh"), str(data), str(output)],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            self.assertEqual((scratch / "spill.bin").read_bytes(), b"spill")
+            self.assertEqual((scratch / "telemetry.json").read_text(), "{}\n")
+
+    def test_telemetry_requires_successful_reconciled_counters(self):
         counters = {
-            "discovered_files": 0,
-            "input_rows": 0,
-            "accepted_rows": 0,
-            "dropped_rows": 0,
-            "output_rows": 0,
-            "bytes_read": 0,
-            "bytes_written": 0,
+            phase: {
+                "discovered_files": 0,
+                "input_rows": 0,
+                "accepted_rows": 0,
+                "dropped_rows": 0,
+                "output_rows": 0,
+                "bytes_read": 0,
+                "bytes_written": 0,
+            }
+            for phase in BENCHMARK.PHASES
         }
+        counters["discovery"]["discovered_files"] = 3
+        counters["links"].update(input_rows=10, accepted_rows=10)
+        counters["events"].update(
+            input_rows=BENCHMARK.DEV_EVENTS,
+            accepted_rows=BENCHMARK.DEV_EVENTS - 1,
+            dropped_rows=1,
+        )
+        counters["clicks"].update(input_rows=250, accepted_rows=250)
+        counters["write"].update(output_rows=2, bytes_written=100)
         telemetry = {
             "format_version": 1,
             "outcome": "success",
             "phases": [
-                {"phase": phase, "elapsed_ns": 0, "counters": counters}
+                {"phase": phase, "elapsed_ns": 0, "counters": counters[phase]}
                 for phase in BENCHMARK.PHASES
             ],
             "resources": {
-                "cgroup_memory_peak_bytes": 0,
+                "cgroup_memory_peak_bytes": 1,
                 "scratch_high_water_bytes": 0,
             },
         }
-        BENCHMARK.validate_telemetry(json.loads(json.dumps(telemetry)))
-        telemetry["phases"].pop()
-        with self.assertRaises(BENCHMARK.GateFailure):
-            BENCHMARK.validate_telemetry(telemetry)
+        BENCHMARK.validate_telemetry(
+            json.loads(json.dumps(telemetry)), expected_clicks=250
+        )
 
-    def test_output_digest_requires_one_canonical_part_per_table(self):
+        failed = json.loads(json.dumps(telemetry))
+        failed["outcome"] = "failed"
+        with self.assertRaises(BENCHMARK.GateFailure):
+            BENCHMARK.validate_telemetry(failed, expected_clicks=250)
+
+        empty = json.loads(json.dumps(telemetry))
+        for phase in empty["phases"]:
+            phase["counters"] = dict.fromkeys(phase["counters"], 0)
+        with self.assertRaises(BENCHMARK.GateFailure):
+            BENCHMARK.validate_telemetry(empty, expected_clicks=250)
+
+    def test_output_layout_requires_one_canonical_part_per_table(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
             for table in BENCHMARK.TABLES:
                 folder = output / table
                 folder.mkdir()
                 (folder / "part-0.parquet").write_bytes(table.encode())
-            first = BENCHMARK.output_digest(output)
-            second = BENCHMARK.output_digest(output)
-            self.assertEqual(first, second)
-            (output / "user_daily" / "part-1.parquet").write_bytes(b"extra")
+            BENCHMARK.validate_output_layout(output)
+            (output / "user_daily" / "unexpected.txt").write_bytes(b"extra")
             with self.assertRaises(BENCHMARK.GateFailure):
-                BENCHMARK.output_digest(output)
+                BENCHMARK.validate_output_layout(output)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,14 @@ PLATFORM="${PLATFORM:-linux/amd64}"
 DATA=$(cd "$1" && pwd)
 mkdir -p "$2"
 OUT=$(cd "$2" && pwd)
-SCRATCH=$(mktemp -d)
+REMOVE_SCRATCH=0
+if [ -n "${SCRATCH_DIR:-}" ]; then
+  mkdir -p "$SCRATCH_DIR"
+  SCRATCH=$(cd "$SCRATCH_DIR" && pwd)
+else
+  SCRATCH=$(mktemp -d)
+  REMOVE_SCRATCH=1
+fi
 chmod 777 "$OUT" "$SCRATCH"
 release() {
   if [ -n "$(find "$OUT" "$SCRATCH" ! -user "$(id -u)" -print -quit 2>/dev/null)" ]; then
@@ -19,7 +26,9 @@ release() {
   if [ -n "${V2_TELEMETRY_PATH:-}" ] && [ -f "$SCRATCH/v2-telemetry.json" ]; then
     cp "$SCRATCH/v2-telemetry.json" "$V2_TELEMETRY_PATH"
   fi
-  rm -rf "$SCRATCH" 2>/dev/null || true
+  if [ "$REMOVE_SCRATCH" -eq 1 ]; then
+    rm -rf "$SCRATCH" 2>/dev/null || true
+  fi
 }
 trap release EXIT
 docker run --rm --platform "$PLATFORM" \

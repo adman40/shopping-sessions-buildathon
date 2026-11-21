@@ -44,7 +44,7 @@ def load_actual(folder, schema):
             raise ValueError(f"{path}: expected {list(schema)}, got {frame.columns}")
         for column, expected in schema.items():
             actual = frame.schema[column]
-            if expected == pl.Int128 and actual.is_integer():
+            if expected == pl.Int128 and actual.is_signed_integer():
                 continue
             if expected == pl.String and actual.base_type() in (pl.String, pl.Categorical, pl.Enum):
                 continue

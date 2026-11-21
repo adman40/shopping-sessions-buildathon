@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{ByteHandle, PipelineError, PipelineErrorKind};
+use crate::{ByteHandle, ByteSpan, PipelineError, PipelineErrorKind};
 
 macro_rules! code_type {
     ($name:ident, $doc:literal) => {
@@ -69,9 +69,9 @@ pub enum EventKind {
 /// Views and carts carry neither. Constructors enforce this invariant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EventPayload {
-    pub kind: EventKind,
-    pub category: Option<CategoryCode>,
-    pub price_cents: Option<u32>,
+    kind: EventKind,
+    category: Option<CategoryCode>,
+    price_cents: Option<u32>,
 }
 
 impl EventPayload {
@@ -94,6 +94,21 @@ impl EventPayload {
             category: Some(category),
             price_cents: Some(price_cents),
         })
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> EventKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn category(&self) -> Option<CategoryCode> {
+        self.category
+    }
+
+    #[must_use]
+    pub const fn price_cents(&self) -> Option<u32> {
+        self.price_cents
     }
 }
 
@@ -147,28 +162,71 @@ impl CompactEventBatch {
     }
 }
 
-/// Owns compact clicks and their index-aligned click-ID handles.
+/// Owns compact clicks and their index-aligned click IDs in a contiguous byte arena.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CompactClickBatch {
-    pub records: Vec<CompactClick>,
-    pub click_ids: Vec<ByteHandle>,
+    records: Box<[CompactClick]>,
+    click_ids: Box<[ByteSpan]>,
+    click_id_bytes: Box<[u8]>,
 }
 
 impl CompactClickBatch {
+    /// Builds a batch whose click-ID spans all resolve in the supplied arena.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invariant error when sidecar lengths differ or a span is out of bounds.
+    pub fn new(
+        records: Vec<CompactClick>,
+        click_ids: Vec<ByteSpan>,
+        click_id_bytes: Vec<u8>,
+    ) -> Result<Self, PipelineError> {
+        let batch = Self {
+            records: records.into_boxed_slice(),
+            click_ids: click_ids.into_boxed_slice(),
+            click_id_bytes: click_id_bytes.into_boxed_slice(),
+        };
+        batch.validate()?;
+        Ok(batch)
+    }
+
+    #[must_use]
+    pub fn records(&self) -> &[CompactClick] {
+        &self.records
+    }
+
+    #[must_use]
+    pub fn click_id(&self, record_index: usize) -> Option<&[u8]> {
+        self.click_ids
+            .get(record_index)
+            .and_then(|span| span.resolve(&self.click_id_bytes))
+    }
+
     /// Validates the index-aligned click-ID sidecar.
     ///
     /// # Errors
     ///
-    /// Returns an invariant error when sidecar and record lengths differ.
+    /// Returns an invariant error when sidecar lengths differ or a span is out of bounds.
     pub fn validate(&self) -> Result<(), PipelineError> {
         if self.records.len() != self.click_ids.len() {
             return Err(PipelineError::new(
                 PipelineErrorKind::Invariant,
                 format!(
-                    "{} click records have {} click-ID handles",
+                    "{} click records have {} click-ID spans",
                     self.records.len(),
                     self.click_ids.len()
                 ),
+            ));
+        }
+        if let Some((index, _)) = self
+            .click_ids
+            .iter()
+            .enumerate()
+            .find(|(_, span)| span.resolve(&self.click_id_bytes).is_none())
+        {
+            return Err(PipelineError::new(
+                PipelineErrorKind::Invariant,
+                format!("click-ID span at index {index} is out of bounds"),
             ));
         }
         Ok(())
@@ -192,7 +250,16 @@ mod tests {
     fn payload_invariants_are_explicit() {
         assert!(EventPayload::non_purchase(EventKind::Purchase).is_none());
         assert!(EventPayload::purchase(CategoryCode(1), 0).is_none());
-        assert!(EventPayload::purchase(CategoryCode(1), 10_000_000).is_some());
+
+        let view = EventPayload::non_purchase(EventKind::View).unwrap();
+        assert_eq!(view.kind(), EventKind::View);
+        assert_eq!(view.category(), None);
+        assert_eq!(view.price_cents(), None);
+
+        let purchase = EventPayload::purchase(CategoryCode(1), 10_000_000).unwrap();
+        assert_eq!(purchase.kind(), EventKind::Purchase);
+        assert_eq!(purchase.category(), Some(CategoryCode(1)));
+        assert_eq!(purchase.price_cents(), Some(10_000_000));
     }
 
     #[test]
@@ -207,14 +274,29 @@ mod tests {
         };
         assert!(events.validate().is_err());
 
-        let clicks = CompactClickBatch {
-            records: vec![CompactClick {
-                timestamp_ms: 0,
-                person: PersonCode(0),
-                campaign: CampaignCode(0),
-            }],
-            click_ids: vec![],
+        let click = CompactClick {
+            timestamp_ms: 0,
+            person: PersonCode(0),
+            campaign: CampaignCode(0),
         };
-        assert!(clicks.validate().is_err());
+        assert!(CompactClickBatch::new(vec![click], vec![], vec![]).is_err());
+        assert!(
+            CompactClickBatch::new(
+                vec![click],
+                vec![ByteSpan::new(2, 2).unwrap()],
+                b"abc".to_vec(),
+            )
+            .is_err()
+        );
+
+        let clicks = CompactClickBatch::new(
+            vec![click],
+            vec![ByteSpan::new(1, 2).unwrap()],
+            b"zab".to_vec(),
+        )
+        .unwrap();
+        assert_eq!(clicks.records(), &[click]);
+        assert_eq!(clicks.click_id(0), Some(&b"ab"[..]));
+        assert_eq!(clicks.click_id(1), None);
     }
 }
