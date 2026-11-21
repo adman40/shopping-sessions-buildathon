@@ -30,3 +30,33 @@ run-dev: build
 ANSWER ?= dev-answer
 check-dev:
 	python3 scripts/compare.py out $(ANSWER)
+
+V2_IMAGE ?= shopping-sessions-v2:latest
+V2_CANDIDATE ?= v2/docker_run.sh
+V2_DEV ?= dev
+V2_ANSWER ?= dev-answer
+
+.PHONY: v2-build v2-test v2-dev v2-differential v2-benchmark
+
+## Build the Slice 0 V2 Rust submission shell
+v2-build:
+	docker buildx build --platform $(PLATFORM) --load -f v2/Dockerfile -t $(V2_IMAGE) .
+
+## Compile, test, format-check, and lint the frozen Rust contracts
+v2-test:
+	cargo test --locked --manifest-path v2/Cargo.toml
+	cargo fmt --all --manifest-path v2/Cargo.toml --check
+	cargo clippy --locked --manifest-path v2/Cargo.toml --all-targets -- -D warnings
+	python3 -m unittest v2/tests/test_harness.py
+
+## Generate provenance-certified exact 1M development data
+v2-dev:
+	python3 scripts/v2_generate.py --seed 1 --events 1000000 --clicks 250000 --output $(V2_DEV)
+
+## Compare randomized small candidate outputs with the V1 Polars oracle
+v2-differential:
+	python3 scripts/v2_differential.py --candidate '$(V2_CANDIDATE)'
+
+## Report timing only after every V2 correctness and telemetry gate passes
+v2-benchmark:
+	python3 scripts/v2_benchmark.py --candidate '$(V2_CANDIDATE)' --fixtures $(FIXTURES) --dev-data $(V2_DEV) --dev-answer $(V2_ANSWER)
