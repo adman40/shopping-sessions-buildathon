@@ -105,6 +105,37 @@ pub fn sweep_worker<O: RecordOrderer>(
     events.validate().map_err(sweep_error)?;
     clicks.validate().map_err(sweep_error)?;
     let ordering = orderer.order(&events.records, clicks).map_err(sort_error)?;
+    sweep_ordered(events, clicks, &ordering)
+}
+
+/// Scans one worker partition after its records have been ordered.
+///
+/// This boundary lets orchestration time ordering separately from the fused
+/// session and attribution scan. The supplied ordering must come from a
+/// [`RecordOrderer`] over these exact batches.
+///
+/// # Errors
+///
+/// Returns an invariant error for invalid compact batches, incomplete or
+/// out-of-bounds permutations, missing payloads, or arithmetic outside the
+/// output integer ranges.
+pub fn sweep_ordered(
+    events: &CompactEventBatch,
+    clicks: &CompactClickBatch,
+    ordering: &OrderedRecords,
+) -> Result<WorkerAggregate, PipelineError> {
+    events.validate().map_err(sweep_error)?;
+    clicks.validate().map_err(sweep_error)?;
+    validate_permutation(
+        &ordering.event_indices,
+        events.records.len(),
+        "event ordering",
+    )?;
+    validate_permutation(
+        &ordering.click_indices,
+        clicks.records().len(),
+        "click ordering",
+    )?;
     let mut worker = WorkerAggregate {
         sort_counters: ordering.counters,
         ..WorkerAggregate::default()
@@ -143,6 +174,30 @@ pub fn sweep_worker<O: RecordOrderer>(
         )?;
     }
     Ok(worker)
+}
+
+fn validate_permutation(
+    indices: &[usize],
+    expected_length: usize,
+    label: &str,
+) -> Result<(), PipelineError> {
+    if indices.len() != expected_length {
+        return Err(invariant(format!(
+            "{label} has {} indices for {expected_length} records",
+            indices.len()
+        )));
+    }
+    let mut seen = vec![false; expected_length];
+    for &index in indices {
+        let present = seen
+            .get_mut(index)
+            .ok_or_else(|| invariant(format!("{label} index {index} is out of bounds")))?;
+        if *present {
+            return Err(invariant(format!("{label} repeats index {index}")));
+        }
+        *present = true;
+    }
+    Ok(())
 }
 
 /// Deterministically reduces worker-private aggregates and resolves output text.

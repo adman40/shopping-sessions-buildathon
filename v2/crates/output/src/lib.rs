@@ -140,9 +140,7 @@ fn schema_for(contract: &[ColumnSchema]) -> Arc<Schema> {
                     LogicalType::Date => DataType::Date32,
                     LogicalType::SignedInteger => DataType::Int64,
                 };
-                // Physical optionality intentionally remains starter-compatible. Semantic
-                // validation rejects nulls except in user_daily.top_category.
-                Field::new(column.name, data_type, true)
+                Field::new(column.name, data_type, column.nullable)
             })
             .collect::<Vec<_>>(),
     ))
@@ -479,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn writer_uses_128k_zstd1_row_groups_and_compatible_optionality() {
+    fn writer_uses_128k_zstd1_row_groups_and_contract_optionality() {
         let root = temporary_output();
         fs::create_dir_all(&root).unwrap();
         let count = ROW_GROUP_ROWS + 1;
@@ -512,13 +510,15 @@ mod tests {
             .columns()
             .iter()
             .all(|column| matches!(column.compression(), Compression::ZSTD(level) if level.compression_level() == ZSTD_LEVEL))));
-        assert!(
+        assert_eq!(
             metadata
                 .file_metadata()
                 .schema_descr()
                 .columns()
                 .iter()
-                .all(|column| column.max_def_level() == 1)
+                .map(|column| column.max_def_level())
+                .collect::<Vec<_>>(),
+            [0, 0, 0, 0, 0, 1]
         );
         fs::remove_dir_all(root).unwrap();
     }

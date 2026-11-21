@@ -6,7 +6,8 @@ use shopping_sessions_domain::{
     CompactEventBatch, EpochDay, EventKind, EventPayload, EventPayloadCode, OwnedUtf8, PersonCode,
 };
 use shopping_sessions_sweep::{
-    DimensionLookup, StablePersonTimeOrder, reduce_workers, sweep, sweep_worker,
+    DimensionLookup, OrderedRecords, RecordOrderer, StablePersonTimeOrder, reduce_workers, sweep,
+    sweep_ordered, sweep_worker,
 };
 
 #[derive(Default)]
@@ -262,6 +263,30 @@ fn l_compacts_for_one_linked_person_share_sessions_clicks_and_canonical_name() {
         (1, 1, 800, 1)
     );
     assert_eq!((c2.sessions, c2.assisted_sessions), (0, 1));
+}
+
+#[test]
+fn ordering_and_sweep_can_be_timed_at_separate_boundaries() {
+    let events = event_batch(&[
+        (PersonCode(1), 20, view()),
+        (PersonCode(0), 10, purchase(0, 250)),
+    ]);
+    let clicks = click_batch(&[(PersonCode(0), 9, CampaignCode(0), b"first")]);
+    let ordering = StablePersonTimeOrder
+        .order(&events.records, &clicks)
+        .expect("ordering succeeds");
+    let separated = sweep_ordered(&events, &clicks, &ordering).expect("ordered sweep succeeds");
+    let combined =
+        sweep_worker(&events, &clicks, &StablePersonTimeOrder).expect("combined sweep succeeds");
+
+    assert_eq!(separated, combined);
+
+    let invalid = OrderedRecords {
+        event_indices: vec![0, 0],
+        click_indices: vec![0],
+        counters: ordering.counters,
+    };
+    assert!(sweep_ordered(&events, &clicks, &invalid).is_err());
 }
 
 #[test]
