@@ -108,11 +108,11 @@ def run_checked(arguments: list[str], label: str):
         raise GateFailure(f"{label} failed; diagnostics withheld until correctness passes")
 
 
-def compare_outputs(left: Path, right: Path, label: str):
-    run_checked(
-        [sys.executable, str(Path(__file__).with_name("compare.py")), str(left), str(right)],
-        label,
-    )
+def compare_outputs(left: Path, right: Path, label: str, *, reference_right: bool = False):
+    arguments = [sys.executable, str(Path(__file__).with_name("compare.py"))]
+    if reference_right:
+        arguments.append("--reference-right")
+    run_checked(arguments + [str(left), str(right)], label)
 
 
 def validate_output_layout(output: Path):
@@ -237,17 +237,26 @@ def main() -> int:
         first = temporary / "first"
         second = temporary / "second"
         run_candidate(command, args.dev_data, first)
-        compare_outputs(first, args.dev_answer, "exact 1M and schema gate")
+        compare_outputs(
+            first, args.dev_answer, "exact 1M and schema gate", reference_right=True
+        )
         validate_output_layout(first)
         run_candidate(command, args.dev_data, second)
-        compare_outputs(second, args.dev_answer, "repeat exact 1M and schema gate")
+        compare_outputs(
+            second,
+            args.dev_answer,
+            "repeat exact 1M and schema gate",
+            reference_right=True,
+        )
         compare_outputs(first, second, "deterministic-repeat row and schema gate")
         validate_output_layout(second)
 
     with tempfile.TemporaryDirectory(prefix="v2-benchmark-") as temporary:
         output = Path(temporary) / "output"
         elapsed_ns, monitor, telemetry = run_candidate(command, args.dev_data, output, measured=True)
-        compare_outputs(output, args.dev_answer, "timed-run correctness gate")
+        compare_outputs(
+            output, args.dev_answer, "timed-run correctness gate", reference_right=True
+        )
         validate_output_layout(output)
         if telemetry is None:
             raise GateFailure("candidate emitted no telemetry; refusing to report timing")

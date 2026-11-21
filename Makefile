@@ -29,7 +29,7 @@ run-dev: build
 ## Compare your dev output with the published dev answer (dev-answer.zip, unzipped): make check-dev ANSWER=dev-answer
 ANSWER ?= dev-answer
 check-dev:
-	python3 scripts/compare.py out $(ANSWER)
+	python3 scripts/compare.py --reference-right out $(ANSWER)
 
 V2_IMAGE ?= shopping-sessions-v2:latest
 V2_CANDIDATE ?= v2/docker_run.sh
