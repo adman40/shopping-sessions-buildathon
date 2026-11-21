@@ -130,9 +130,12 @@ impl IdentityBuilder {
             roots.push(self.dsu.find(id));
         }
 
-        let mut sorted_old_ids: Vec<u32> = (0..id_count)
-            .map(|id| u32::try_from(id).map_err(|_| resource_error("too many identity IDs")))
-            .collect::<Result<_, _>>()?;
+        let mut sorted_old_ids = Vec::with_capacity(id_count);
+        for id in 0..id_count {
+            sorted_old_ids.push(
+                u32::try_from(id).map_err(|_| resource_error("too many identity IDs"))?,
+            );
+        }
         sorted_old_ids
             .sort_unstable_by(|left, right| self.ids.bytes(*left).cmp(self.ids.bytes(*right)));
 

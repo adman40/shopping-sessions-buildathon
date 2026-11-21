@@ -5,9 +5,9 @@ IMAGE="${IMAGE:-shopping-sessions-v2:latest}"
 CPUS="${CPUS:-8}"
 MEM="${MEM:-24g}"
 PLATFORM="${PLATFORM:-linux/amd64}"
-DATA=$(cd "$1" && pwd -P)
+DATA=$(cd "$1" && pwd)
 mkdir -p "$2"
-OUT=$(cd "$2" && pwd -P)
+OUT=$(cd "$2" && pwd)
 REMOVE_SCRATCH=0
 if [ -n "${SCRATCH_DIR:-}" ]; then
   mkdir -p "$SCRATCH_DIR"
