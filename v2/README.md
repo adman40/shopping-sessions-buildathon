@@ -1,7 +1,8 @@
 # V2 Rust foundation
 
 Slice 0 freezes the cross-slice contracts in `crates/domain` and provides a fail-closed `app` shell.
-The app intentionally does not process data until later implementation slices land.
+Slice 6 provides the native Parquet writer and staged publication in `crates/output`.
+The app intentionally does not process data until the integration slices land.
 Contract changes require tests and an entry in `../docs/V2_DECISION_LOG.md`.
 
 ## Ownership
@@ -14,7 +15,7 @@ Contract changes require tests and an entry in `../docs/V2_DECISION_LOG.md`.
 
 ## Validation commands
 
-Run the Slice 0 contract and harness tests plus configured Rust format and lint checks:
+Run the frozen contracts, Slice 6 output checks, harness tests, and configured Rust format and lint checks:
 
 ```sh
 make v2-test
@@ -38,4 +39,4 @@ Run the correctness-gated benchmark:
 python3 scripts/v2_benchmark.py --candidate 'v2/docker_run.sh' --fixtures fixtures --dev-data dev --dev-answer dev-answer
 ```
 
-The benchmark prints no timing unless 36 fixtures, exact 1M output and schema, deterministic repeat output, timed-run correctness, telemetry validation, and the harness-overhead limit all pass. Slice 0 validates logical types and observed null values; Slice 6 owns physical Parquet field optionality in its writer/readback tests.
+The benchmark prints no timing unless 36 fixtures, exact 1M output and schema, deterministic repeat output, timed-run correctness, telemetry validation, and the harness-overhead limit all pass. The [Slice 6 output contract](../docs/V2_IMPLEMENTATION_PLAN.md#slice-6--parquet-output-and-publication-contract) is authoritative for physical Parquet field optionality.

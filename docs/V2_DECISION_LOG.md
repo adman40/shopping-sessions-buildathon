@@ -17,4 +17,8 @@ Every future contract change requires a focused contract test and an entry here.
 - Deterministic-repeat comparison is semantic rather than raw Parquet bytes because physical encodings and metadata are not scorer-visible and may vary while the required table is identical.
 - Randomized differential tests use the published generator's smallest supported dataset of 1,000 events and compare against the unchanged V1 Polars pipeline.
 - The `app` crate is a fail-closed submission-shell stub only.
-- Parsing, identity construction, reduction, sweeping, output writing, orchestration, and optimization remain unimplemented for their later slices.
+- Parsing, identity construction, reduction, sweeping, output writing, orchestration, and optimization were deliberately deferred from Slice 0 to their later slices.
+
+## Slice 6 - 2026-11-20
+
+- Physical schema and publication details are now frozen by the [Slice 6 output contract](V2_IMPLEMENTATION_PLAN.md#slice-6--parquet-output-and-publication-contract); Slice 0's semantic nullability and sweep-to-output row contracts are unchanged.
