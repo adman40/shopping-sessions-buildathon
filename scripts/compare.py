@@ -3,14 +3,14 @@
 from pathlib import Path
 import sys
 
-from run_fixtures import SCHEMAS, load_actual, load_expected
+from run_fixtures import NULLABLE_COLUMNS, SCHEMAS, load_actual, load_expected
 
 
 def load(folder, table):
     csv = folder / f"{table}.csv"
     if csv.is_file():
         return load_expected(csv, SCHEMAS[table])
-    return load_actual(folder / table, SCHEMAS[table])
+    return load_actual(folder / table, SCHEMAS[table], NULLABLE_COLUMNS[table])
 
 
 def main():

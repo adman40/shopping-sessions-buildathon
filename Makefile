@@ -47,7 +47,7 @@ v2-test:
 	cargo test --locked --manifest-path v2/Cargo.toml
 	cargo fmt --all --manifest-path v2/Cargo.toml --check
 	cargo clippy --locked --manifest-path v2/Cargo.toml --all-targets -- -D warnings
-	python3 -m unittest v2/tests/test_harness.py
+	python3 -m unittest discover -s v2/tests -p 'test_*.py'
 
 ## Generate provenance-certified exact 1M development data
 v2-dev:

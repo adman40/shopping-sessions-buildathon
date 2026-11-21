@@ -22,6 +22,10 @@ SCHEMAS = {
     "campaign_daily": {"campaign_id": pl.String, "channel": pl.String, "day": pl.Date, "sessions": pl.Int128,
                        "purchasing_sessions": pl.Int128, "revenue_cents": pl.Int128, "assisted_sessions": pl.Int128},
 }
+NULLABLE_COLUMNS = {
+    "user_daily": frozenset({"top_category"}),
+    "campaign_daily": frozenset(),
+}
 
 
 def load_expected(path, schema):
@@ -31,7 +35,7 @@ def load_expected(path, schema):
     return df.with_columns(pl.col("day").str.to_date())
 
 
-def load_actual(folder, schema):
+def load_actual(folder, schema, nullable_columns):
     folder = Path(folder)
     if folder.is_symlink() or not folder.is_dir():
         raise ValueError(f"expected an output directory: {folder}")
@@ -44,12 +48,16 @@ def load_actual(folder, schema):
             raise ValueError(f"{path}: expected {list(schema)}, got {frame.columns}")
         for column, expected in schema.items():
             actual = frame.schema[column]
-            if expected == pl.Int128 and actual.is_signed_integer():
-                continue
-            if expected == pl.String and actual.base_type() in (pl.String, pl.Categorical, pl.Enum):
-                continue
-            if actual != expected:
+            if expected == pl.Int128:
+                type_matches = actual.is_signed_integer()
+            elif expected == pl.String:
+                type_matches = actual.base_type() in (pl.String, pl.Categorical, pl.Enum)
+            else:
+                type_matches = actual == expected
+            if not type_matches:
                 raise ValueError(f"{path}: {column} has type {actual}, expected {expected}")
+            if column not in nullable_columns and frame[column].null_count():
+                raise ValueError(f"{path}: {column} contains null values")
         frames.append(frame.select(schema.keys()).cast(schema))
     if not frames:
         raise ValueError(f"no parquet in {folder}")
@@ -105,7 +113,9 @@ def main():
                         ]
                         if visible != ["part-0.parquet"]:
                             raise ValueError(f"expected only part-0.parquet, got {visible}")
-                    act = rows(load_actual(os.path.join(out, table), schema))
+                    act = rows(load_actual(
+                        os.path.join(out, table), schema, NULLABLE_COLUMNS[table]
+                    ))
                 except (ValueError, OSError, pl.exceptions.PolarsError) as error:
                     ok = False
                     print(f"FAIL {case} {table}: {error}")

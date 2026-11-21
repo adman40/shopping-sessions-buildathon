@@ -40,4 +40,4 @@ Run the correctness-gated benchmark:
 python3 scripts/v2_benchmark.py --candidate 'v2/docker_run.sh' --fixtures fixtures --dev-data dev --dev-answer dev-answer
 ```
 
-The benchmark prints no timing unless 36 fixtures, exact 1M output and schema, deterministic repeat output, timed-run correctness, telemetry validation, and the harness-overhead limit all pass.
+The benchmark prints no timing unless 36 fixtures, exact 1M output and schema, deterministic repeat output, timed-run correctness, telemetry validation, and the harness-overhead limit all pass. Slice 0 validates logical types and observed null values; Slice 6 owns physical Parquet field optionality in its writer/readback tests.
