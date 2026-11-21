@@ -7,6 +7,7 @@ Usage: python run_fixtures.py FIXTURES_DIR -- CMD...
 CMD gets DATA_DIR and OUTPUT_DIR as env vars and as the last two arguments.
 Example: python run_fixtures.py ../fixtures -- python reference.py
 """
+import argparse
 import os
 from pathlib import Path
 import subprocess
@@ -21,6 +22,10 @@ SCHEMAS = {
     "campaign_daily": {"campaign_id": pl.String, "channel": pl.String, "day": pl.Date, "sessions": pl.Int128,
                        "purchasing_sessions": pl.Int128, "revenue_cents": pl.Int128, "assisted_sessions": pl.Int128},
 }
+NULLABLE_COLUMNS = {
+    "user_daily": frozenset({"top_category"}),
+    "campaign_daily": frozenset(),
+}
 
 
 def load_expected(path, schema):
@@ -30,7 +35,7 @@ def load_expected(path, schema):
     return df.with_columns(pl.col("day").str.to_date())
 
 
-def load_actual(folder, schema):
+def load_actual(folder, schema, nullable_columns):
     folder = Path(folder)
     if folder.is_symlink() or not folder.is_dir():
         raise ValueError(f"expected an output directory: {folder}")
@@ -43,12 +48,16 @@ def load_actual(folder, schema):
             raise ValueError(f"{path}: expected {list(schema)}, got {frame.columns}")
         for column, expected in schema.items():
             actual = frame.schema[column]
-            if expected == pl.Int128 and actual.is_integer():
-                continue
-            if expected == pl.String and actual.base_type() in (pl.String, pl.Categorical, pl.Enum):
-                continue
-            if actual != expected:
+            if expected == pl.Int128:
+                type_matches = actual.is_signed_integer()
+            elif expected == pl.String:
+                type_matches = actual.base_type() in (pl.String, pl.Categorical, pl.Enum)
+            else:
+                type_matches = actual == expected
+            if not type_matches:
                 raise ValueError(f"{path}: {column} has type {actual}, expected {expected}")
+            if column not in nullable_columns and frame[column].null_count():
+                raise ValueError(f"{path}: {column} contains null values")
         frames.append(frame.select(schema.keys()).cast(schema))
     if not frames:
         raise ValueError(f"no parquet in {folder}")
@@ -61,17 +70,33 @@ def rows(df):
 
 def main():
     sep = sys.argv.index("--")
-    fx_dir, cmd = sys.argv[1], sys.argv[sep + 1:]
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("fixtures_dir")
+    parser.add_argument("--require-count", type=int)
+    parser.add_argument("--require-single-part", action="store_true")
+    args = parser.parse_args(sys.argv[1:sep])
+    fx_dir, cmd = args.fixtures_dir, sys.argv[sep + 1:]
     failed = []
     cases = sorted(d for d in os.listdir(fx_dir) if os.path.isdir(os.path.join(fx_dir, d)))
     if not cases:
         sys.exit(f"no fixtures in {fx_dir}")
+    if args.require_count is not None and len(cases) != args.require_count:
+        sys.exit(f"expected exactly {args.require_count} fixtures, found {len(cases)}")
     for case in cases:
         data = os.path.join(fx_dir, case, "data")
         if not os.path.isdir(data):
             data = os.path.join(fx_dir, case, "input")
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as out:
-            env = dict(os.environ, DATA_DIR=data, OUTPUT_DIR=out)
+        with (
+            tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as out,
+            tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as scratch,
+        ):
+            env = dict(
+                os.environ,
+                DATA_DIR=data,
+                OUTPUT_DIR=out,
+                SCRATCH_DIR=scratch,
+                V2_TELEMETRY_PATH=os.path.join(scratch, "v2-telemetry.json"),
+            )
             p = subprocess.run(cmd + [data, out], env=env, capture_output=True, text=True)
             if p.returncode != 0:
                 failed.append(case)
@@ -81,7 +106,16 @@ def main():
             for table, schema in SCHEMAS.items():
                 exp = rows(load_expected(os.path.join(fx_dir, case, "expected", f"{table}.csv"), schema))
                 try:
-                    act = rows(load_actual(os.path.join(out, table), schema))
+                    if args.require_single_part:
+                        visible = [
+                            path.name for path in Path(out, table).glob("*.parquet")
+                            if not path.name.startswith((".", "_")) and path.is_file() and not path.is_symlink()
+                        ]
+                        if visible != ["part-0.parquet"]:
+                            raise ValueError(f"expected only part-0.parquet, got {visible}")
+                    act = rows(load_actual(
+                        os.path.join(out, table), schema, NULLABLE_COLUMNS[table]
+                    ))
                 except (ValueError, OSError, pl.exceptions.PolarsError) as error:
                     ok = False
                     print(f"FAIL {case} {table}: {error}")
