@@ -91,6 +91,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "shopping-sessions-reduce"
+version = "0.1.0"
+dependencies = [
+ "shopping-sessions-domain",
+]
+
+[[package]]
 name = "syn"
 version = "3.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"

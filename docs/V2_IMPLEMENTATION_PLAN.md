@@ -2,7 +2,7 @@
 
 ## Goal and non-goals
 
-V2 replaces the scored Polars data path with a compact Rust pipeline. It keeps the current `main` branch as the known-good, submit-ready Polars baseline. All V2 work starts on `v2-rust-plan` and is submitted only after it passes the same gates.
+V2 replaces the scored Polars data path with a compact Rust pipeline. It keeps the current `main` branch as the known-good, submit-ready Polars baseline. After Slice 0 was frozen on the published `v2/slice0-contracts` branch, each implementation slice branches from that contract baseline and is submitted only after it passes the same gates.
 
 The objective is a correct pipeline with a measured x86-64 Linux runtime below 150 seconds, leaving margin below the 180-second limit. The research estimate is 114 seconds; that is a planning hypothesis, not a target we assume is achieved.
 
@@ -196,7 +196,7 @@ Any contract change requires fixture tests and an updated entry in the decision 
 | G | Slice 6 output | Parquet schema/readback suite |
 | H | Slice 7 orchestration | forced-memory transition test |
 
-Each branch changes only its owned crate/tests. It must rebase on the frozen Slice 0 contract rather than changing another slice's API. Integration commits are responsible for end-to-end fixture/dev evidence.
+Each branch changes only its owned crate/tests plus minimal workspace registration. It must rebase on the frozen Slice 0 contract rather than changing another slice's API. Integration commits are responsible for end-to-end fixture/dev evidence.
 
 ## Performance decision gates
 
