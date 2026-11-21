@@ -2,7 +2,7 @@
 
 ## Goal and non-goals
 
-V2 replaces the scored Polars data path with a compact Rust pipeline. It keeps the current `main` branch as the known-good, submit-ready Polars baseline. All V2 work starts on `v2-rust-plan` and is submitted only after it passes the same gates.
+V2 replaces the scored Polars data path with a compact Rust pipeline. It keeps the current `main` branch as the known-good, submit-ready Polars baseline. Implementation branches start from the published `v2/slice0-contracts` branch and are submitted only after they pass the same gates.
 
 The objective is a correct pipeline with a measured x86-64 Linux runtime below 150 seconds, leaving margin below the 180-second limit. The research estimate is 114 seconds; that is a planning hypothesis, not a target we assume is achieved.
 
@@ -107,7 +107,7 @@ Any contract change requires fixture tests and an updated entry in the decision 
 **Deliverables:**
 - Exact event-ID winner selection with collision-safe equality.
 - Validation only after the winner is selected, including late-event behavior.
-- Canonical-person and product/category resolution, then compact event records.
+- Canonical-person resolution for every survivor and category lookup for purchases, then compact event records.
 - Explicit release of event-ID winner state before sorting.
 
 **Acceptance:** all event fixtures pass, especially invalid-earliest duplicate cases; survivor counters reconcile with inputs; compact record layout is asserted in tests.
