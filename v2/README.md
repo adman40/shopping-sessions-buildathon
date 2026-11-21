@@ -1,7 +1,7 @@
 # V2 Rust foundation
 
-Slice 0 freezes the cross-slice contracts in `crates/domain` and provides a fail-closed `app` shell.
-The app intentionally does not process data until later implementation slices land.
+Slice 0 freezes the cross-slice contracts in `crates/domain`. Slice 1 adds exact input discovery, CSV and timestamp parsing, and catalog and manifest loading in `crates/parser`.
+The `app` remains a fail-closed shell; the parser is not yet wired into an end-to-end candidate.
 Contract changes require tests and an entry in `../docs/V2_DECISION_LOG.md`.
 
 ## Ownership
@@ -14,7 +14,7 @@ Contract changes require tests and an entry in `../docs/V2_DECISION_LOG.md`.
 
 ## Validation commands
 
-Run the Slice 0 contract and harness tests plus configured Rust format and lint checks:
+Run all landed V2 crate and harness tests plus configured Rust format and lint checks:
 
 ```sh
 make v2-test

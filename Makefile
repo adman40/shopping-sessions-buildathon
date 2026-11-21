@@ -42,7 +42,7 @@ V2_ANSWER ?= dev-answer
 v2-build:
 	docker buildx build --platform $(PLATFORM) --load -f v2/Dockerfile -t $(V2_IMAGE) .
 
-## Compile, test, format-check, and lint the frozen Rust contracts
+## Compile, test, format-check, and lint all landed V2 crates
 v2-test:
 	cargo test --locked --manifest-path v2/Cargo.toml
 	cargo fmt --all --manifest-path v2/Cargo.toml --check

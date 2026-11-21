@@ -1,0 +1,16 @@
+[package]
+name = "shopping-sessions-parser"
+version = "0.1.0"
+description = "Exact input discovery and scalar parser for Shopping Sessions V2."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+shopping-sessions-domain.workspace = true
+
+[lints]
+workspace = true
