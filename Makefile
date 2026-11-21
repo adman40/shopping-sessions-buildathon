@@ -67,8 +67,9 @@ bench-vm-test:
 	bash bench/vm/tests/test_cli.sh
 
 ## Print the exact VM command plan without performing any work
-BENCH_SHA ?= 8a35b964aed48ecba5e44d061606b2a4bb9a2239
+BENCH_SHA ?= $(shell git rev-parse HEAD)
+BENCH_MODE ?= v2
 BENCH_EVENTS ?= 100000
 BENCH_CLICKS ?= 25000
 bench-vm-plan:
-	python3 bench/vm/shopping_bench.py plan --sha $(BENCH_SHA) --events $(BENCH_EVENTS) --clicks $(BENCH_CLICKS)
+	python3 bench/vm/shopping_bench.py plan --mode $(BENCH_MODE) --sha $(BENCH_SHA) --events $(BENCH_EVENTS) --clicks $(BENCH_CLICKS)

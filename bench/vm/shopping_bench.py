@@ -24,16 +24,29 @@ import threading
 import time
 from typing import Any
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 REPO_URL = "https://github.com/adman40/shopping-sessions-buildathon.git"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 TIERS = (100_000, 1_000_000, 5_000_000, 15_000_000, 30_000_000, 60_000_000)
 MEMORY_BYTES = 24 * 1024**3
 TMPFS_BYTES = 64 * 1024**2
 DISK_STOP_BYTES = 45 * 1024**3
-CSV_FIELDS = (
+EXPECTED_FIXTURES = 36
+CANDIDATE_MODES = ("v2", "v1-smoke")
+PHASES = ("discovery", "links", "events", "clicks", "sort", "sweep", "write")
+LEGACY_CSV_FIELDS = (
     "schema_version", "run_id", "measurement_label", "outcome", "eligible_timing",
     "git_sha", "image_id", "generator_binary_sha256", "dataset_manifest_sha256",
+    "seed", "events", "clicks", "cache_class", "wall_ns", "exit_code", "oom_killed",
+    "memory_peak_bytes", "cpu_usage_usec", "cpu_utilization_percent_of_8",
+    "io_read_bytes", "io_write_bytes", "output_peak_allocated_bytes",
+    "scratch_peak_allocated_bytes", "combined_peak_allocated_bytes",
+    "fixtures_passed", "fixtures_total", "self_check", "disk_cap_parity",
+)
+CSV_FIELDS = (
+    "schema_version", "run_id", "candidate_mode", "result_status", "operator_label",
+    "outcome", "eligible_timing", "git_sha", "image_id", "generator_binary_sha256",
+    "dataset_manifest_sha256", "candidate_telemetry_sha256",
     "seed", "events", "clicks", "cache_class", "wall_ns", "exit_code", "oom_killed",
     "memory_peak_bytes", "cpu_usage_usec", "cpu_utilization_percent_of_8",
     "io_read_bytes", "io_write_bytes", "output_peak_allocated_bytes",
@@ -57,6 +70,22 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def artifact_metadata(path: Path, relative_to: Path) -> dict[str, Any]:
+    return {
+        "path": path.relative_to(relative_to).as_posix(),
+        "sha256": sha256_file(path),
+        "size_bytes": path.stat().st_size,
+    }
+
+
+def candidate_config(mode: str) -> dict[str, Any]:
+    if mode == "v2":
+        return {"mode": mode, "dockerfile": "v2/Dockerfile", "telemetry_required": True}
+    if mode == "v1-smoke":
+        return {"mode": mode, "dockerfile": "Dockerfile", "telemetry_required": False}
+    raise ValueError(f"--mode must be one of {', '.join(CANDIDATE_MODES)}")
+
+
 def validate_sha(value: str) -> str:
     if not SHA_RE.fullmatch(value):
         raise ValueError("--sha must be a lower-case, full 40-character commit SHA")
@@ -71,9 +100,10 @@ def validate_scale(events: int, clicks: int) -> None:
 
 
 def command_for_container(image: str, name: str, data: Path, output: Path,
-                          scratch: Path) -> list[str]:
+                          scratch: Path, mode: str) -> list[str]:
     """Return the single authoritative scorer-equivalent create command."""
-    return [
+    config = candidate_config(mode)
+    command = [
         "docker", "create", "--name", name,
         "--label", "org.shopping-bench.managed=true",
         "--label", f"org.shopping-bench.run={name}",
@@ -87,8 +117,12 @@ def command_for_container(image: str, name: str, data: Path, output: Path,
         "--mount", f"type=bind,src={scratch.resolve()},dst=/scratch",
         "--env", "DATA_DIR=/data", "--env", "OUTPUT_DIR=/output",
         "--env", "SCRATCH_DIR=/scratch", "--env", "HOME=/scratch",
-        "--env", "NCPU=8", "--env", "MEM_GB=24", image,
+        "--env", "NCPU=8", "--env", "MEM_GB=24",
     ]
+    if config["telemetry_required"]:
+        command += ["--env", "V2_TELEMETRY_PATH=/scratch/v2-telemetry.json"]
+    command.append(image)
+    return command
 
 
 class BusyError(RuntimeError):
@@ -119,12 +153,11 @@ class BenchLock:
         self.handle.close()
 
 
-def atomic_json(path: Path, value: dict[str, Any]) -> None:
+def atomic_bytes(path: Path, value: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}")
-    with temporary.open("w", encoding="utf-8") as handle:
-        json.dump(value, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    with temporary.open("wb") as handle:
+        handle.write(value)
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
@@ -135,6 +168,11 @@ def atomic_json(path: Path, value: dict[str, Any]) -> None:
         os.close(directory)
 
 
+def atomic_json(path: Path, value: dict[str, Any]) -> None:
+    encoded = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    atomic_bytes(path, encoded)
+
+
 def flatten_result(result: dict[str, Any]) -> dict[str, Any]:
     provenance = result["provenance"]
     resources = result["resources"]
@@ -143,11 +181,13 @@ def flatten_result(result: dict[str, Any]) -> dict[str, Any]:
     container = result["container"]
     return {
         "schema_version": result["schema_version"], "run_id": result["run_id"],
-        "measurement_label": result["measurement_label"], "outcome": result["outcome"],
+        "candidate_mode": result["candidate_mode"], "result_status": result["result_status"],
+        "operator_label": result.get("operator_label") or "", "outcome": result["outcome"],
         "eligible_timing": str(result["eligible_timing"]).lower(),
         "git_sha": provenance["git_sha"], "image_id": provenance["image_id"],
         "generator_binary_sha256": provenance["generator_binary_sha256"],
         "dataset_manifest_sha256": provenance["dataset_manifest_sha256"],
+        "candidate_telemetry_sha256": result["telemetry"]["artifact"].get("sha256", ""),
         "seed": provenance["seed"], "events": provenance["events"], "clicks": provenance["clicks"],
         "cache_class": timing["class"], "wall_ns": timing["wall_ns"],
         "exit_code": container["exit_code"], "oom_killed": str(container["oom_killed"]).lower(),
@@ -164,11 +204,44 @@ def flatten_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def upgrade_results_csv(results_csv: Path) -> None:
+    if not results_csv.exists():
+        return
+    with results_csv.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fields = tuple(reader.fieldnames or ())
+        rows = list(reader)
+    if fields == CSV_FIELDS:
+        return
+    if fields != LEGACY_CSV_FIELDS:
+        raise RuntimeError(f"unsupported results CSV fields: {fields}")
+    upgraded = []
+    for legacy in rows:
+        row = {field: legacy.get(field, "") for field in CSV_FIELDS}
+        row.update({
+            "candidate_mode": "v1-smoke",
+            "result_status": ("passing-v1-smoke-only"
+                              if legacy.get("eligible_timing") == "true" else "ineligible"),
+            "operator_label": legacy.get("measurement_label", ""),
+            "candidate_telemetry_sha256": "",
+        })
+        upgraded.append(row)
+    temporary = results_csv.with_name(f".{results_csv.name}.upgrade.{os.getpid()}")
+    with temporary.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+        writer.writeheader()
+        writer.writerows(upgraded)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, results_csv)
+
+
 def finalize_result(run_dir: Path, results_csv: Path, result: dict[str, Any]) -> None:
     """Atomically finalize authoritative JSON, then append its CSV projection."""
     atomic_json(run_dir / "result.json", result)
     row = flatten_result(result)
     results_csv.parent.mkdir(parents=True, exist_ok=True)
+    upgrade_results_csv(results_csv)
     new_file = not results_csv.exists()
     with results_csv.open("a", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
@@ -244,12 +317,37 @@ def write_manifest(data: Path, manifest: Path) -> str:
 
 
 def verify_manifest(data: Path, manifest: Path) -> str:
-    for line in manifest.read_text(encoding="utf-8").splitlines():
+    lines = manifest.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        raise RuntimeError("dataset manifest is empty")
+    for line in lines:
         digest, size, relative = line.split("  ", 2)
-        path = data / relative
+        relative_path = Path(relative)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            raise RuntimeError(f"dataset manifest has an unsafe path: {relative}")
+        path = data / relative_path
         if not path.is_file() or path.stat().st_size != int(size) or sha256_file(path) != digest:
             raise RuntimeError(f"dataset checksum mismatch: {relative}")
     return sha256_file(manifest)
+
+
+def validate_dataset_provenance(generation: dict[str, Any], *, generator_sha: str,
+                                binary_sha: str, manifest_sha: str, seed: int,
+                                events: int, clicks: int) -> None:
+    expected = {
+        "generator_sha": generator_sha,
+        "generator_binary_sha256": binary_sha,
+        "dataset_manifest_sha256": manifest_sha,
+        "seed": seed,
+        "events": events,
+        "clicks": clicks,
+        "threads": 8,
+    }
+    mismatches = [key for key, value in expected.items() if generation.get(key) != value]
+    if generation.get("schema_version") != 1:
+        mismatches.append("schema_version")
+    if mismatches:
+        raise RuntimeError("existing dataset provenance mismatch: " + ", ".join(mismatches))
 
 
 def prepare_dataset(root: Path, binary: Path, generator_sha: str, binary_sha: str,
@@ -261,8 +359,10 @@ def prepare_dataset(root: Path, binary: Path, generator_sha: str, binary_sha: st
     if dataset.exists():
         digest = verify_manifest(data, manifest)
         generation = json.loads((dataset / "generation.json").read_text(encoding="utf-8"))
-        if generation["generator_binary_sha256"] != binary_sha:
-            raise RuntimeError("existing dataset generator binary provenance mismatch")
+        validate_dataset_provenance(
+            generation, generator_sha=generator_sha, binary_sha=binary_sha,
+            manifest_sha=digest, seed=seed, events=events, clicks=clicks,
+        )
         return data, generation
     temporary = root / "tmp" / f"{dataset_id}.partial.{os.getpid()}"
     shutil.rmtree(temporary, ignore_errors=True)
@@ -279,44 +379,66 @@ def prepare_dataset(root: Path, binary: Path, generator_sha: str, binary_sha: st
         "started_unix_ns": started, "finished_unix_ns": time.time_ns(),
         "dataset_manifest_sha256": digest,
     }
+    validate_dataset_provenance(
+        generation, generator_sha=generator_sha, binary_sha=binary_sha,
+        manifest_sha=digest, seed=seed, events=events, clicks=clicks,
+    )
     atomic_json(temporary / "generation.json", generation)
     os.replace(temporary, dataset)
     return data, generation
 
 
-def build_image(source: Path, sha: str) -> tuple[str, dict[str, Any]]:
-    dockerfile = source / "Dockerfile"
-    tag = f"shopping-bench:{sha}"
+def build_image(source: Path, sha: str, mode: str, *, checker: bool = False) -> tuple[str, dict[str, Any]]:
+    config = candidate_config("v1-smoke" if checker else mode)
+    dockerfile_relative = config["dockerfile"]
+    dockerfile = source / dockerfile_relative
+    role = "checker" if checker else "candidate"
+    tag = f"shopping-bench-{mode}-{role}:{sha}"
     run(["docker", "build", "--pull", "--platform", "linux/amd64",
          "--label", "org.shopping-bench.managed=true",
          "--label", f"org.opencontainers.image.revision={sha}",
-         "--label", f"org.shopping-bench.commit={sha}", "--tag", tag,
+         "--label", f"org.shopping-bench.commit={sha}",
+         "--label", f"org.shopping-bench.mode={mode}",
+         "--label", f"org.shopping-bench.role={role}", "--tag", tag,
          "--file", str(dockerfile), str(source)], timeout=3600)
     image = json.loads(run(["docker", "image", "inspect", tag]).stdout)[0]
     image_id = image["Id"]
+    labels = image.get("Config", {}).get("Labels", {})
     if not image_id.startswith("sha256:"):
         raise RuntimeError("Docker returned a non-content-addressed image ID")
-    if image.get("Config", {}).get("Labels", {}).get("org.opencontainers.image.revision") != sha:
+    if labels.get("org.opencontainers.image.revision") != sha:
         raise RuntimeError("image revision label does not match source SHA")
-    return image_id, {"dockerfile_sha256": sha256_file(dockerfile), "inspect": image}
+    if labels.get("org.shopping-bench.mode") != mode or labels.get("org.shopping-bench.role") != role:
+        raise RuntimeError("image mode or role label does not match the requested build")
+    return image_id, {
+        "dockerfile": dockerfile_relative,
+        "dockerfile_sha256": sha256_file(dockerfile),
+        "inspect": image,
+        "role": role,
+    }
 
 
-def create_container(image: str, name: str, data: Path, output: Path, scratch: Path) -> str:
+def create_container(image: str, name: str, data: Path, output: Path, scratch: Path,
+                     mode: str) -> str:
     output.mkdir(parents=True, exist_ok=False)
     scratch.mkdir(parents=True, exist_ok=False)
     output.chmod(0o777)
     scratch.chmod(0o777)
-    container_id = run(command_for_container(image, name, data, output, scratch)).stdout.strip()
-    verify_container(container_id, data, output, scratch)
+    container_id = run(command_for_container(image, name, data, output, scratch, mode)).stdout.strip()
+    verify_container(container_id, data, output, scratch, mode)
     return container_id
 
 
-def verify_container(container_id: str, data: Path, output: Path, scratch: Path) -> None:
+def verify_container(container_id: str, data: Path, output: Path, scratch: Path,
+                     mode: str) -> None:
+    config_for_mode = candidate_config(mode)
     info = json.loads(run(["docker", "inspect", container_id]).stdout)[0]
     host, config = info["HostConfig"], info["Config"]
     failures = []
     expected_env = {"DATA_DIR=/data", "OUTPUT_DIR=/output", "SCRATCH_DIR=/scratch",
                     "HOME=/scratch", "NCPU=8", "MEM_GB=24"}
+    if config_for_mode["telemetry_required"]:
+        expected_env.add("V2_TELEMETRY_PATH=/scratch/v2-telemetry.json")
     checks = {
         "network none": host.get("NetworkMode") == "none",
         "read-only root": host.get("ReadonlyRootfs") is True,
@@ -409,8 +531,14 @@ def check_output(image: str, output: Path, expected: Path | None = None) -> dict
     return value
 
 
-def fixture_gates(source: Path, image: str, work: Path) -> dict[str, Any]:
+def fixture_gates(source: Path, image: str, checker_image: str, work: Path,
+                  mode: str) -> dict[str, Any]:
     fixtures = sorted(path for path in (source / "fixtures").iterdir() if path.is_dir())
+    if len(fixtures) != EXPECTED_FIXTURES:
+        return {
+            "passed": 0, "total": len(fixtures), "ok": False,
+            "failures": [{"error": f"expected exactly {EXPECTED_FIXTURES} fixtures"}],
+        }
     passed, failures = 0, []
     for fixture in fixtures:
         case = re.sub(r"[^A-Za-z0-9_.-]", "-", fixture.name)
@@ -420,10 +548,10 @@ def fixture_gates(source: Path, image: str, work: Path) -> dict[str, Any]:
         container_id = ""
         try:
             container_id = create_container(image, f"shopping-bench-fixture-{os.getpid()}-{case.lower()}",
-                                            data, run_path / "output", run_path / "scratch")
+                                            data, run_path / "output", run_path / "scratch", mode)
             completed = run(["docker", "start", "-a", container_id], check=False, timeout=180)
             state = json.loads(run(["docker", "inspect", container_id]).stdout)[0]["State"]
-            check = check_output(image, run_path / "output", fixture / "expected")
+            check = check_output(checker_image, run_path / "output", fixture / "expected")
             if completed.returncode == 0 and state["ExitCode"] == 0 and not state["OOMKilled"] and check["ok"]:
                 passed += 1
             else:
@@ -631,7 +759,87 @@ def docker_timestamp_ns(value: str) -> int:
     return seconds * 1_000_000_000 + int(fraction or 0)
 
 
-def ensure_progressive_gate(root: Path, sha: str, seed: int, events: int) -> None:
+def validate_candidate_telemetry(value: Any, expected_events: int,
+                                 expected_clicks: int) -> None:
+    if not isinstance(value, dict) or value.get("format_version") != 1:
+        raise RuntimeError("candidate telemetry format_version must be 1")
+    if value.get("outcome") != "success":
+        raise RuntimeError("candidate telemetry outcome must be success")
+    phases = value.get("phases")
+    if (not isinstance(phases, list) or any(not isinstance(item, dict) for item in phases)
+            or tuple(item.get("phase") for item in phases) != PHASES):
+        raise RuntimeError(f"candidate telemetry must contain phases in order: {PHASES}")
+    required_counters = {
+        "discovered_files", "input_rows", "accepted_rows", "dropped_rows",
+        "output_rows", "bytes_read", "bytes_written",
+    }
+    counters_by_phase: dict[str, dict[str, int]] = {}
+    for item in phases:
+        phase = item.get("phase")
+        if type(item.get("elapsed_ns")) is not int or item["elapsed_ns"] < 0:
+            raise RuntimeError(f"invalid elapsed_ns for {phase}")
+        counters = item.get("counters")
+        if not isinstance(counters, dict) or set(counters) != required_counters:
+            raise RuntimeError(f"invalid counters for {phase}")
+        if any(type(count) is not int or count < 0 for count in counters.values()):
+            raise RuntimeError(f"negative or non-integer counter for {phase}")
+        counters_by_phase[phase] = counters
+    if counters_by_phase["discovery"]["discovered_files"] == 0:
+        raise RuntimeError("discovery telemetry reports no input files")
+    for phase, minimum in (("links", 1), ("events", expected_events),
+                           ("clicks", expected_clicks)):
+        counters = counters_by_phase[phase]
+        if counters["input_rows"] < minimum:
+            raise RuntimeError(f"{phase} telemetry reports too few input rows")
+        if counters["accepted_rows"] + counters["dropped_rows"] != counters["input_rows"]:
+            raise RuntimeError(f"{phase} accepted and dropped rows do not reconcile with input")
+    write = counters_by_phase["write"]
+    if write["output_rows"] == 0 or write["bytes_written"] == 0:
+        raise RuntimeError("write telemetry reports no output")
+    resources = value.get("resources")
+    expected_resources = {"cgroup_memory_peak_bytes", "scratch_high_water_bytes"}
+    if not isinstance(resources, dict) or set(resources) != expected_resources:
+        raise RuntimeError("candidate telemetry resources are missing")
+    if any(type(resource) is not int or resource < 0 for resource in resources.values()):
+        raise RuntimeError("candidate telemetry resources must be non-negative integers")
+
+
+def ingest_candidate_telemetry(scratch: Path, run_dir: Path, mode: str,
+                               expected_events: int,
+                               expected_clicks: int) -> tuple[Any, dict[str, Any]]:
+    required = candidate_config(mode)["telemetry_required"]
+    source = scratch / "v2-telemetry.json"
+    metadata: dict[str, Any] = {
+        "required": required, "present": False, "valid": not required,
+        "path": None, "sha256": "", "size_bytes": 0,
+    }
+    if not source.is_file() or source.is_symlink():
+        if required:
+            metadata["validation_error"] = "candidate emitted no regular telemetry file"
+        return None, metadata
+    raw = source.read_bytes()
+    destination = run_dir / "candidate-telemetry.json"
+    atomic_bytes(destination, raw)
+    metadata.update(artifact_metadata(destination, run_dir))
+    metadata["present"] = True
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        metadata["validation_error"] = f"candidate telemetry is not valid JSON: {error}"
+        return None, metadata
+    if not required:
+        return value, metadata
+    try:
+        validate_candidate_telemetry(value, expected_events, expected_clicks)
+    except RuntimeError as error:
+        metadata["validation_error"] = str(error)
+        return value, metadata
+    metadata["valid"] = True
+    return value, metadata
+
+
+def ensure_progressive_gate(root: Path, sha: str, seed: int, events: int,
+                            mode: str) -> None:
     if events == TIERS[0]:
         return
     previous = TIERS[TIERS.index(events) - 1]
@@ -642,7 +850,8 @@ def ensure_progressive_gate(root: Path, sha: str, seed: int, events: int) -> Non
         rows = [row for row in csv.DictReader(handle)
                 if row["git_sha"] == sha and int(row["seed"]) == seed and
                 int(row["events"]) == previous and row["outcome"] == "pass" and
-                row["eligible_timing"] == "true" and row["self_check"] == "true"]
+                row["eligible_timing"] == "true" and row["self_check"] == "true" and
+                row.get("candidate_mode", "v1-smoke") == mode]
     if not rows:
         raise RuntimeError(f"progressive gate requires a passing {previous}-event result first")
     prior = rows[-1]
@@ -656,21 +865,35 @@ def ensure_progressive_gate(root: Path, sha: str, seed: int, events: int) -> Non
 
 
 def timed_run(root: Path, source: Path, sha: str, tree: str, image_id: str,
-              image_meta: dict[str, Any], data: Path, generation: dict[str, Any],
-              fixtures: dict[str, Any], seed: int, events: int, clicks: int,
-              idle_seconds: float, timeout_seconds: float, label: str) -> tuple[dict[str, Any], Path]:
+              image_meta: dict[str, Any], checker_image_id: str,
+              checker_image_meta: dict[str, Any], data: Path,
+              generation: dict[str, Any], fixtures: dict[str, Any], seed: int,
+              events: int, clicks: int, idle_seconds: float,
+              timeout_seconds: float, mode: str,
+              operator_label: str | None) -> tuple[dict[str, Any], Path]:
     timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     run_id = f"{timestamp}-{sha[:12]}-s{seed}-e{events}-{image_id[7:19]}-r1"
     run_dir = root / "runs" / run_id
     run_dir.mkdir(parents=True)
     output, scratch = run_dir / "output", run_dir / "scratch"
+    image_inspect_path = run_dir / "candidate-image-inspect.json"
+    checker_inspect_path = run_dir / "checker-image-inspect.json"
+    dataset_manifest_path = run_dir / "DATA_SHA256SUMS"
+    generation_path = run_dir / "generation.json"
+    atomic_json(image_inspect_path, image_meta["inspect"])
+    atomic_json(checker_inspect_path, checker_image_meta["inspect"])
+    atomic_json(generation_path, generation)
     idle = idle_preflight(idle_seconds)
     if run(["git", "-C", str(source), "rev-parse", "HEAD"]).stdout.strip() != sha or run(["git", "-C", str(source), "status", "--porcelain"]).stdout:
         raise RuntimeError("source changed after build")
     manifest = data.parent / "DATA_SHA256SUMS"
     manifest_sha = verify_manifest(data, manifest)
+    atomic_bytes(dataset_manifest_path, manifest.read_bytes())
+    if sha256_file(dataset_manifest_path) != manifest_sha:
+        raise RuntimeError("dataset manifest changed while preparing run provenance")
     name = f"shopping-bench-{run_id.lower()}"
-    container_id = create_container(image_id, name, data, output, scratch)
+    container_id = create_container(image_id, name, data, output, scratch, mode)
+    create_command = command_for_container(image_id, name, data, output, scratch, mode)
     stdout_path, stderr_path = run_dir / "stdout.log", run_dir / "stderr.log"
     monitor = Monitor(container_id, output, scratch)
     timed_out = False
@@ -690,21 +913,37 @@ def timed_run(root: Path, source: Path, sha: str, tree: str, image_id: str,
         inspect = json.loads(run(["docker", "inspect", container_id]).stdout)[0]
         state = inspect["State"]
         resources = monitor.finish(ended_ns - started_ns)
-        self_check = check_output(image_id, output)
+        self_check = check_output(checker_image_id, output)
+        telemetry, telemetry_artifact = ingest_candidate_telemetry(
+            scratch, run_dir, mode, events, clicks
+        )
         oom_event = resources["memory_events"].get("oom_kill", 0) > 0
         success = (not timed_out and state["ExitCode"] == 0 and not state["OOMKilled"] and not oom_event
-                   and not monitor.disk_threshold_exceeded and self_check.get("ok") is True)
+                   and not monitor.disk_threshold_exceeded and self_check.get("ok") is True
+                   and telemetry_artifact["valid"])
         if timed_out: outcome = "timeout"
         elif state["OOMKilled"] or oom_event or monitor.disk_threshold_exceeded: outcome = "resource_fail"
         elif state["ExitCode"] != 0 or not self_check.get("ok"): outcome = "correctness_fail"
+        elif not telemetry_artifact["valid"]: outcome = "telemetry_fail"
         else: outcome = "pass"
+        result_status = (
+            "eligible-v2-candidate" if success and mode == "v2"
+            else "passing-v1-smoke-only" if success
+            else "ineligible"
+        )
         result = {
-            "schema_version": SCHEMA_VERSION, "run_id": run_id, "measurement_label": label,
-            "outcome": outcome, "eligible_timing": success, "started_utc": started_utc,
+            "schema_version": SCHEMA_VERSION, "run_id": run_id,
+            "candidate_mode": mode, "result_status": result_status,
+            "operator_label": operator_label, "outcome": outcome,
+            "eligible_timing": success, "started_utc": started_utc,
             "provenance": {
                 "repository": REPO_URL, "git_sha": sha, "git_tree": tree, "git_tree_clean": True,
                 "image_id": image_id, "image_revision_label": sha,
+                "dockerfile": image_meta["dockerfile"],
                 "dockerfile_sha256": image_meta["dockerfile_sha256"],
+                "checker_image_id": checker_image_id,
+                "checker_dockerfile": checker_image_meta["dockerfile"],
+                "checker_dockerfile_sha256": checker_image_meta["dockerfile_sha256"],
                 "generator_sha": generation["generator_sha"],
                 "generator_binary_sha256": generation["generator_binary_sha256"],
                 "dataset_manifest_sha256": manifest_sha, "seed": seed, "events": events, "clicks": clicks,
@@ -712,24 +951,35 @@ def timed_run(root: Path, source: Path, sha: str, tree: str, image_id: str,
             "host": {**host_facts(), "idle_preflight": idle},
             "limits": {"cpus": 8, "memory_bytes": MEMORY_BYTES, "swap_bytes": 0,
                        "pids": 4096, "tmpfs_bytes": TMPFS_BYTES, "timeout_seconds": timeout_seconds},
-            "container": {"id": container_id, "flags_sha256": hashlib.sha256("\0".join(command_for_container(image_id, name, data, output, scratch)).encode()).hexdigest(),
-                          "started_at": state["StartedAt"], "finished_at": state["FinishedAt"],
-                          "exit_code": state["ExitCode"], "oom_killed": state["OOMKilled"]},
+            "container": {
+                "id": container_id, "create_command": create_command,
+                "flags_sha256": hashlib.sha256("\0".join(create_command).encode()).hexdigest(),
+                "started_at": state["StartedAt"], "finished_at": state["FinishedAt"],
+                "exit_code": state["ExitCode"], "oom_killed": state["OOMKilled"],
+            },
             "timing": {"class": "warm", "repetition": 1, "wall_ns": ended_ns - started_ns,
                        "docker_state_wall_ns": docker_timestamp_ns(state["FinishedAt"]) - docker_timestamp_ns(state["StartedAt"]),
                        "clock": "CLOCK_MONOTONIC", "boundary": "docker-start-request-to-observed-exit"},
             "resources": resources,
             "correctness": {"fixtures_passed": fixtures["passed"], "fixtures_total": fixtures["total"],
                             "fixture_gate": fixtures["ok"], "self_check": self_check.get("ok") is True,
-                            "self_check_details": self_check},
+                            "self_check_details": self_check,
+                            "telemetry_gate": telemetry_artifact["valid"]},
+            "telemetry": {"candidate": telemetry, "artifact": telemetry_artifact},
             "parity": {
                 "container_constraints": "official-equivalent-verified",
                 "combined_disk_cap": "monitor-only-no-hard-cap",
                 "cache_state": "warm-unspecified-official-cache",
                 "counter_note": "null values mean the cgroup-v2 counter was unavailable",
-                "score_status": "V1 smoke measurement - not V2 and not an official score",
             },
-            "artifacts": {"stdout": "stdout.log", "stderr": "stderr.log", "dataset_manifest": str(manifest)},
+            "artifacts": {
+                "stdout": artifact_metadata(stdout_path, run_dir),
+                "stderr": artifact_metadata(stderr_path, run_dir),
+                "candidate_image_inspect": artifact_metadata(image_inspect_path, run_dir),
+                "checker_image_inspect": artifact_metadata(checker_inspect_path, run_dir),
+                "dataset_manifest": artifact_metadata(dataset_manifest_path, run_dir),
+                "dataset_generation": artifact_metadata(generation_path, run_dir),
+            },
         }
         finalize_result(run_dir, root / "results" / "results.csv", result)
         return result, run_dir
@@ -742,22 +992,36 @@ def timed_run(root: Path, source: Path, sha: str, tree: str, image_id: str,
 def campaign(args: argparse.Namespace) -> int:
     sha = validate_sha(args.sha)
     validate_scale(args.events, args.clicks)
+    candidate_config(args.mode)
     root = Path(args.root).resolve()
     ensure_layout(root)
     with BenchLock(root / "locks" / "run.lock"):
         recover(root)
-        ensure_progressive_gate(root, sha, args.seed, args.events)
+        ensure_progressive_gate(root, sha, args.seed, args.events, args.mode)
         source, tree = source_checkout(root, sha)
         binary, binary_sha = build_generator(root, source, sha)
         data, generation = prepare_dataset(root, binary, sha, binary_sha, args.seed, args.events, args.clicks)
-        image_id, image_meta = build_image(source, sha)
-        fixture_result = fixture_gates(source, image_id, root / "tmp")
+        image_id, image_meta = build_image(source, sha, args.mode)
+        if args.mode == "v2":
+            checker_image_id, checker_image_meta = build_image(source, sha, args.mode, checker=True)
+        else:
+            checker_image_id, checker_image_meta = image_id, image_meta
+        fixture_result = fixture_gates(
+            source, image_id, checker_image_id, root / "tmp", args.mode
+        )
+        fixture_result.update({
+            "candidate_mode": args.mode, "candidate_image_id": image_id,
+            "checker_image_id": checker_image_id,
+        })
         atomic_json(root / "results" / f"fixtures-{sha}-{image_id[7:19]}.json", fixture_result)
         if not fixture_result["ok"]:
             raise RuntimeError(f"fixture gate failed after {fixture_result['passed']}/{fixture_result['total']}; stop")
-        result, run_dir = timed_run(root, source, sha, tree, image_id, image_meta, data, generation,
-                                    fixture_result, args.seed, args.events, args.clicks,
-                                    args.idle_seconds, args.timeout_seconds, args.label)
+        result, run_dir = timed_run(
+            root, source, sha, tree, image_id, image_meta, checker_image_id,
+            checker_image_meta, data, generation, fixture_result, args.seed,
+            args.events, args.clicks, args.idle_seconds, args.timeout_seconds,
+            args.mode, args.label,
+        )
         print(json.dumps({"run_id": result["run_id"], "outcome": result["outcome"],
                           "eligible_timing": result["eligible_timing"], "result": str(run_dir / "result.json")},
                          sort_keys=True))
@@ -793,14 +1057,17 @@ def cleanup(root: Path, dry_run: bool) -> list[str]:
 def plan(args: argparse.Namespace) -> int:
     validate_sha(args.sha)
     validate_scale(args.events, args.clicks)
+    config = candidate_config(args.mode)
     root = Path(args.root).resolve()
     data = root / "datasets" / f"g{args.sha}-s{args.seed}-e{args.events}-c{args.clicks}" / "data"
     command = command_for_container(f"sha256:{'0' * 64}", "shopping-bench-dry-run", data,
                                     root / "runs" / "dry-run" / "output",
-                                    root / "runs" / "dry-run" / "scratch")
-    print(json.dumps({"schema_version": 1, "dry_run": True, "source_sha": args.sha,
-                      "generator_sha": args.sha, "events": args.events, "clicks": args.clicks,
-                      "container_create": command, "timed_boundary": "docker start -a"}, indent=2))
+                                    root / "runs" / "dry-run" / "scratch", args.mode)
+    print(json.dumps({"schema_version": SCHEMA_VERSION, "dry_run": True, "source_sha": args.sha,
+                      "generator_sha": args.sha, "candidate_mode": args.mode,
+                      "dockerfile": config["dockerfile"], "events": args.events,
+                      "clicks": args.clicks, "container_create": command,
+                      "timed_boundary": "docker start -a"}, indent=2))
     return 0
 
 
@@ -811,13 +1078,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     for name in ("plan", "campaign"):
         item = sub.add_parser(name)
         item.add_argument("--sha", required=True)
+        item.add_argument("--mode", choices=CANDIDATE_MODES, default="v2")
         item.add_argument("--seed", type=int, default=1)
         item.add_argument("--events", type=int, required=True)
         item.add_argument("--clicks", type=int, required=True)
         if name == "campaign":
             item.add_argument("--idle-seconds", type=float, default=5.0)
             item.add_argument("--timeout-seconds", type=float, default=180.0)
-            item.add_argument("--label", default="V1 smoke measurement")
+            item.add_argument("--label", help="optional operator note; not a score classification")
     cleanup_parser = sub.add_parser("cleanup")
     cleanup_parser.add_argument("--dry-run", action="store_true")
     sub.add_parser("recover")
