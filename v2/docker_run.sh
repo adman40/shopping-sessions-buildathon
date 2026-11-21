@@ -5,16 +5,21 @@ IMAGE="${IMAGE:-shopping-sessions-v2:latest}"
 CPUS="${CPUS:-8}"
 MEM="${MEM:-24g}"
 PLATFORM="${PLATFORM:-linux/amd64}"
-DATA=$(cd "$1" && pwd)
+DATA=$(cd "$1" && pwd -P)
 mkdir -p "$2"
-OUT=$(cd "$2" && pwd)
+OUT=$(cd "$2" && pwd -P)
 REMOVE_SCRATCH=0
 if [ -n "${SCRATCH_DIR:-}" ]; then
   mkdir -p "$SCRATCH_DIR"
-  SCRATCH=$(cd "$SCRATCH_DIR" && pwd)
+  SCRATCH=$(cd "$SCRATCH_DIR" && pwd -P)
 else
   SCRATCH=$(mktemp -d)
   REMOVE_SCRATCH=1
+fi
+TELEMETRY=
+if [ -n "${V2_TELEMETRY_PATH:-}" ]; then
+  TELEMETRY_DIR=$(cd "$(dirname "$V2_TELEMETRY_PATH")" && pwd -P)
+  TELEMETRY="$TELEMETRY_DIR/$(basename "$V2_TELEMETRY_PATH")"
 fi
 chmod 777 "$OUT" "$SCRATCH"
 release() {
@@ -23,8 +28,11 @@ release() {
       -v "$OUT":/output:z -v "$SCRATCH":/scratch:z --entrypoint chmod "$IMAGE" \
       -R a+rwX /output /scratch >/dev/null 2>&1 || true
   fi
-  if [ -n "${V2_TELEMETRY_PATH:-}" ] && [ -f "$SCRATCH/v2-telemetry.json" ]; then
-    cp "$SCRATCH/v2-telemetry.json" "$V2_TELEMETRY_PATH"
+  TELEMETRY_SOURCE="$SCRATCH/v2-telemetry.json"
+  if [ -n "$TELEMETRY" ] && [ -f "$TELEMETRY_SOURCE" ] && \
+    [ "$TELEMETRY_SOURCE" != "$TELEMETRY" ] && \
+    { [ ! -f "$TELEMETRY" ] || [ ! "$TELEMETRY_SOURCE" -ef "$TELEMETRY" ]; }; then
+    cp "$TELEMETRY_SOURCE" "$TELEMETRY"
   fi
   if [ "$REMOVE_SCRATCH" -eq 1 ]; then
     rm -rf "$SCRATCH" 2>/dev/null || true

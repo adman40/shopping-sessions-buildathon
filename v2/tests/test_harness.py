@@ -55,7 +55,7 @@ class BenchmarkContracts(unittest.TestCase):
         self.assertNotIn("TIMING", str(failure.exception))
         self.assertNotIn("0.001", str(failure.exception))
 
-    def test_docker_wrapper_uses_caller_owned_scratch(self):
+    def test_docker_wrapper_accepts_telemetry_path_inside_caller_scratch(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             data = root / "data"
@@ -90,7 +90,7 @@ printf '{}\\n' > "$scratch/v2-telemetry.json"
                 os.environ,
                 PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
                 SCRATCH_DIR=str(scratch),
-                V2_TELEMETRY_PATH=str(scratch / "telemetry.json"),
+                V2_TELEMETRY_PATH=str(scratch / "v2-telemetry.json"),
             )
             process = subprocess.run(
                 [str(ROOT / "v2" / "docker_run.sh"), str(data), str(output)],
@@ -100,7 +100,7 @@ printf '{}\\n' > "$scratch/v2-telemetry.json"
             )
             self.assertEqual(process.returncode, 0, process.stderr)
             self.assertEqual((scratch / "spill.bin").read_bytes(), b"spill")
-            self.assertEqual((scratch / "telemetry.json").read_text(), "{}\n")
+            self.assertEqual((scratch / "v2-telemetry.json").read_text(), "{}\n")
 
     def test_telemetry_requires_successful_reconciled_counters(self):
         counters = {

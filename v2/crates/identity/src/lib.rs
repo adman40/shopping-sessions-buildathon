@@ -1,7 +1,6 @@
 #![doc = "Deterministic identity graph and canonicalization for Shopping Sessions V2."]
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
 use std::mem::size_of;
 
 use shopping_sessions_domain::{
@@ -10,7 +9,9 @@ use shopping_sessions_domain::{
 };
 
 const NO_INDEX: u32 = u32::MAX;
-const HASH_ENTRY_ESTIMATE: usize = 24;
+const MIN_HASH_SLOTS: usize = 16;
+const HASH_LOAD_NUMERATOR: usize = 7;
+const HASH_LOAD_DENOMINATOR: usize = 8;
 
 /// The planning envelope for identity construction at representative final scale.
 pub const IDENTITY_MEMORY_ENVELOPE_BYTES: usize = 512 * 1024 * 1024;
@@ -92,10 +93,7 @@ impl IdentityBuilder {
         self.ids.len()
     }
 
-    /// Conservative accounting of heap allocations owned by the builder.
-    ///
-    /// Hash-table control bytes and allocator rounding are represented by a
-    /// deliberately conservative per-entry estimate.
+    /// Accounting of heap allocation capacities owned by the builder.
     #[must_use]
     pub fn estimated_heap_bytes(&self) -> usize {
         self.ids
@@ -114,7 +112,7 @@ impl IdentityBuilder {
             .saturating_mul(size_of::<u32>())
             .saturating_add(size_of::<CanonicalPerson>());
         self.estimated_heap_bytes()
-            .saturating_add(self.ids.estimated_heap_bytes())
+            .saturating_add(self.ids.estimated_frozen_heap_bytes())
             .saturating_add(self.id_count().saturating_mul(per_id_post_pass))
     }
 
@@ -152,10 +150,11 @@ impl IdentityBuilder {
                 .checked_add(self.ids.bytes(*id).len())
                 .ok_or_else(|| resource_error("identity byte arena size overflow"))
         })?;
-        let mut frozen_ids = ExactByteIndex::with_capacity(id_count, total_bytes, self.ids.hasher);
+        let mut frozen_ids =
+            ExactByteIndex::with_capacity(id_count, total_bytes, self.ids.hasher)?;
         let mut old_to_sorted = vec![NO_INDEX; id_count];
         for old_id in &sorted_old_ids {
-            let sorted_id = frozen_ids.intern(self.ids.bytes(*old_id))?;
+            let sorted_id = frozen_ids.insert(self.ids.bytes(*old_id))?;
             old_to_sorted[index(*old_id)] = sorted_id;
         }
 
@@ -205,7 +204,7 @@ impl IdentityBuilder {
         if let Some(id) = self.ids.lookup(bytes) {
             return Ok(id);
         }
-        let id = self.ids.intern(bytes)?;
+        let id = self.ids.insert(bytes)?;
         let dsu_id = self.dsu.push()?;
         if id != dsu_id {
             return Err(invariant_error("identity arena and DSU indexes diverged"));
@@ -268,8 +267,7 @@ impl Canonicalize for IdentityGraph {
 struct ExactByteIndex {
     bytes: Vec<u8>,
     spans: Vec<ByteSpan>,
-    hash_heads: HashMap<u64, u32>,
-    collision_next: Vec<u32>,
+    hash_slots: Vec<u32>,
     hasher: ByteHasher,
 }
 
@@ -278,20 +276,24 @@ impl ExactByteIndex {
         Self {
             bytes: Vec::new(),
             spans: Vec::new(),
-            hash_heads: HashMap::new(),
-            collision_next: Vec::new(),
+            hash_slots: Vec::new(),
             hasher,
         }
     }
 
-    fn with_capacity(ids: usize, bytes: usize, hasher: ByteHasher) -> Self {
-        Self {
+    fn with_capacity(
+        ids: usize,
+        bytes: usize,
+        hasher: ByteHasher,
+    ) -> Result<Self, PipelineError> {
+        let hash_capacity = hash_capacity_for(ids)
+            .ok_or_else(|| resource_error("identity hash index capacity overflow"))?;
+        Ok(Self {
             bytes: Vec::with_capacity(bytes),
             spans: Vec::with_capacity(ids),
-            hash_heads: HashMap::with_capacity(ids),
-            collision_next: Vec::with_capacity(ids),
+            hash_slots: vec![NO_INDEX; hash_capacity],
             hasher,
-        }
+        })
     }
 
     fn len(&self) -> usize {
@@ -310,22 +312,23 @@ impl ExactByteIndex {
     }
 
     fn lookup(&self, bytes: &[u8]) -> Option<u32> {
-        let hash = (self.hasher)(bytes);
-        let mut candidate = self.hash_heads.get(&hash).copied().unwrap_or(NO_INDEX);
-        while candidate != NO_INDEX {
+        if self.hash_slots.is_empty() {
+            return None;
+        }
+        let mut slot = hash_slot((self.hasher)(bytes), self.hash_slots.len());
+        loop {
+            let candidate = self.hash_slots[slot];
+            if candidate == NO_INDEX {
+                return None;
+            }
             if self.bytes(candidate) == bytes {
                 return Some(candidate);
             }
-            candidate = self.collision_next[index(candidate)];
+            slot = (slot + 1) & (self.hash_slots.len() - 1);
         }
-        None
     }
 
-    fn intern(&mut self, bytes: &[u8]) -> Result<u32, PipelineError> {
-        if let Some(id) = self.lookup(bytes) {
-            return Ok(id);
-        }
-
+    fn insert(&mut self, bytes: &[u8]) -> Result<u32, PipelineError> {
         let id = u32::try_from(self.spans.len())
             .map_err(|_| resource_error("identity ID count exceeds u32"))?;
         let offset = u32::try_from(self.bytes.len())
@@ -343,12 +346,48 @@ impl ExactByteIndex {
             return Err(resource_error("identity byte arena exceeds 4 GiB"));
         }
 
+        self.reserve_hash_slot()?;
         let hash = (self.hasher)(bytes);
-        let previous = self.hash_heads.insert(hash, id).unwrap_or(NO_INDEX);
+        let mut slot = hash_slot(hash, self.hash_slots.len());
+        while self.hash_slots[slot] != NO_INDEX {
+            slot = (slot + 1) & (self.hash_slots.len() - 1);
+        }
         self.bytes.extend_from_slice(bytes);
         self.spans.push(span);
-        self.collision_next.push(previous);
+        self.hash_slots[slot] = id;
         Ok(id)
+    }
+
+    fn reserve_hash_slot(&mut self) -> Result<(), PipelineError> {
+        let max_entries = self
+            .hash_slots
+            .len()
+            .saturating_div(HASH_LOAD_DENOMINATOR)
+            .saturating_mul(HASH_LOAD_NUMERATOR);
+        if self.spans.len() < max_entries {
+            return Ok(());
+        }
+
+        let new_capacity = if self.hash_slots.is_empty() {
+            MIN_HASH_SLOTS
+        } else {
+            self.hash_slots
+                .len()
+                .checked_mul(2)
+                .ok_or_else(|| resource_error("identity hash index capacity overflow"))?
+        };
+        let mut new_slots = vec![NO_INDEX; new_capacity];
+        for raw_id in 0..self.spans.len() {
+            let id = u32::try_from(raw_id)
+                .map_err(|_| resource_error("identity ID count exceeds u32"))?;
+            let mut slot = hash_slot((self.hasher)(self.bytes(id)), new_slots.len());
+            while new_slots[slot] != NO_INDEX {
+                slot = (slot + 1) & (new_slots.len() - 1);
+            }
+            new_slots[slot] = id;
+        }
+        self.hash_slots = new_slots;
+        Ok(())
     }
 
     fn estimated_heap_bytes(&self) -> usize {
@@ -356,16 +395,36 @@ impl ExactByteIndex {
             .capacity()
             .saturating_add(self.spans.capacity().saturating_mul(size_of::<ByteSpan>()))
             .saturating_add(
-                self.collision_next
+                self.hash_slots
                     .capacity()
                     .saturating_mul(size_of::<u32>()),
             )
-            .saturating_add(
-                self.hash_heads
-                    .capacity()
-                    .saturating_mul(HASH_ENTRY_ESTIMATE),
-            )
     }
+
+    fn estimated_frozen_heap_bytes(&self) -> usize {
+        let hash_capacity = hash_capacity_for(self.len()).unwrap_or(usize::MAX);
+        self.bytes
+            .len()
+            .saturating_add(self.spans.len().saturating_mul(size_of::<ByteSpan>()))
+            .saturating_add(hash_capacity.saturating_mul(size_of::<u32>()))
+    }
+}
+
+fn hash_capacity_for(ids: usize) -> Option<usize> {
+    if ids == 0 {
+        return Some(0);
+    }
+    let whole = (ids / HASH_LOAD_NUMERATOR).checked_mul(HASH_LOAD_DENOMINATOR)?;
+    let tail = (ids % HASH_LOAD_NUMERATOR) * HASH_LOAD_DENOMINATOR;
+    let required = whole
+        .checked_add(tail.div_ceil(HASH_LOAD_NUMERATOR))?
+        .max(MIN_HASH_SLOTS);
+    required.checked_next_power_of_two()
+}
+
+fn hash_slot(hash: u64, capacity: usize) -> usize {
+    let mask = u64::try_from(capacity - 1).expect("identity hash capacity fits u64");
+    usize::try_from(hash & mask).expect("masked identity hash fits usize")
 }
 
 #[derive(Default)]
@@ -523,17 +582,20 @@ mod tests {
 
     #[test]
     fn hash_collisions_still_require_full_byte_equality() {
+        let ids: Vec<Vec<u8>> = (0..40)
+            .map(|id| format!("id-{id:02}").into_bytes())
+            .collect();
         let mut builder = IdentityBuilder::with_hasher(|_| 7);
-        for id in [b"alpha".as_slice(), b"beta", b"gamma", b"delta"] {
+        for id in &ids {
             builder.ingest_id(id).unwrap();
         }
-        builder.ingest_link(b"beta", b"gamma").unwrap();
+        builder.ingest_link(&ids[38], &ids[1]).unwrap();
         let graph = builder.finish().unwrap();
 
-        assert_eq!(canonical_bytes(&graph, b"alpha"), b"alpha");
-        assert_eq!(canonical_bytes(&graph, b"beta"), b"beta");
-        assert_eq!(canonical_bytes(&graph, b"gamma"), b"beta");
-        assert_eq!(canonical_bytes(&graph, b"delta"), b"delta");
+        for (index, id) in ids.iter().enumerate() {
+            let expected = if index == 38 { &ids[1] } else { id };
+            assert_eq!(canonical_bytes(&graph, id), expected);
+        }
     }
 
     #[test]
@@ -608,36 +670,32 @@ mod tests {
     }
 
     #[test]
-    fn representative_memory_projects_below_half_gibibyte() {
-        const SAMPLE_IDS: usize = 100_000;
-        const FINAL_IDS: usize = 3_600_000;
+    fn representative_full_population_stays_below_half_gibibyte() {
+        const REPRESENTATIVE_IDS: usize = 4_500_000;
 
         let mut builder = IdentityBuilder::new();
-        for id in 0..SAMPLE_IDS {
-            let user = format!("u{id:08}");
-            builder.ingest_id(user.as_bytes()).unwrap();
-            if id % 2 == 1 {
-                let previous = format!("u{:08}", id - 1);
-                builder
-                    .ingest_link(previous.as_bytes(), user.as_bytes())
-                    .unwrap();
-            }
+        for id in 0..REPRESENTATIVE_IDS {
+            builder.ingest_id(&representative_id(id)).unwrap();
         }
-        let measured_sample_peak = builder.estimated_finish_peak_bytes();
-        let graph = builder.finish().unwrap();
-        assert!(graph.estimated_heap_bytes() < measured_sample_peak);
-        let projected = measured_sample_peak
-            .saturating_mul(FINAL_IDS)
-            .div_ceil(SAMPLE_IDS);
-
+        assert_eq!(builder.id_count(), REPRESENTATIVE_IDS);
+        let measured_peak = builder.estimated_finish_peak_bytes();
         let envelope = IDENTITY_MEMORY_ENVELOPE_BYTES;
         println!(
-            "identity memory: sample_peak={measured_sample_peak} projected_final_peak={projected} envelope={envelope}"
+            "identity memory: full_population={REPRESENTATIVE_IDS} measured_peak={measured_peak} envelope={envelope}"
         );
         assert!(
-            projected < envelope,
-            "representative identity projection {projected} exceeds {envelope}"
+            measured_peak < envelope,
+            "representative identity peak {measured_peak} exceeds {envelope}"
         );
+    }
+
+    fn representative_id(mut value: usize) -> [u8; 9] {
+        let mut id = *b"u00000000";
+        for digit in id[1..].iter_mut().rev() {
+            *digit = b'0' + u8::try_from(value % 10).unwrap();
+            value /= 10;
+        }
+        id
     }
 
     fn build_snapshot(ids: &[Vec<u8>], edges: &[(usize, usize)]) -> Vec<(u32, u32, Vec<u8>)> {
