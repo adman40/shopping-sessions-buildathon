@@ -43,7 +43,8 @@ pub struct CanonicalPerson {
 
 /// Read-only identity boundary used by reducers.
 ///
-/// Implementations must return the byte-minimum linked name. Unseen IDs become
+/// Implementations must return the byte-minimum linked name. Callers register every
+/// event/click ID before the graph is frozen; IDs absent from valid links become
 /// byte-exact singleton people. Returned handles remain valid for the run.
 pub trait Canonicalize {
     /// Resolves one exact user ID.

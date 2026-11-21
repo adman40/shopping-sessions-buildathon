@@ -2,7 +2,7 @@
 
 ## Goal and non-goals
 
-V2 replaces the scored Polars data path with a compact Rust pipeline. It keeps the current `main` branch as the known-good, submit-ready Polars baseline. All V2 work starts on `v2-rust-plan` and is submitted only after it passes the same gates.
+V2 replaces the scored Polars data path with a compact Rust pipeline. It keeps the current `main` branch as the known-good, submit-ready Polars baseline. Parallel V2 slice branches start from the published `v2/slice0-contracts` branch and are submitted only after they pass the same gates.
 
 The objective is a correct pipeline with a measured x86-64 Linux runtime below 150 seconds, leaving margin below the 180-second limit. The research estimate is 114 seconds; that is a planning hypothesis, not a target we assume is achieved.
 
@@ -43,7 +43,7 @@ v2/
 ### Boundary contracts
 
 - **Parser -> identity/reduce:** parsed rows preserve exact byte spans and parse status. No trim, Unicode-digit acceptance, CRLF normalization, or validation-order shortcut is allowed.
-- **Identity -> reduce:** `canonicalize(user_bytes) -> PersonCode + canonical_name_handle`; unseen IDs remain byte-exact singleton people.
+- **Identity -> reduce:** `Canonicalize` in `v2/crates/domain/src/compact.rs` owns the frozen canonicalization contract.
 - **Reduce -> sweep:** only validated, non-late winning events and valid deduplicated clicks become 16-byte compact records. Event and click records are sorted/grouped by `(person_code, timestamp)`.
 - **Sweep -> output:** deterministic `UserDailyRow` and `CampaignDailyRow` aggregates with the exact required nullability and date types. Workers own local aggregates; reduction has no order-dependent floating point behavior.
 - **Output:** writes only staged paths under `/output` and `/scratch`, verifies schema/readback, then makes exactly one Parquet file visible per required output directory.
@@ -94,7 +94,7 @@ Any contract change requires fixture tests and an updated entry in the decision 
 - Link ingestion, union-by-size/path-compression DSU, canonical-name post-pass, and singleton behavior.
 - A read-only canonicalization interface for event/click reduction.
 
-**Acceptance:** L1/L2/L3 and randomized graph tests pass; result is independent of link order/file order; measured link build stays below the 0.5 GiB planning envelope at representative scale.
+**Acceptance:** L1/L2/L3 and randomized graph tests pass; result is independent of link order/file order; the capacity-accounted identity-construction peak stays below the 0.5 GiB planning envelope at representative scale.
 
 **Can run in parallel with:** parser tests using raw link records, and sweep tests using synthetic person codes.
 

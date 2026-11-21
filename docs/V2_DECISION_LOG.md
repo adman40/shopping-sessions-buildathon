@@ -17,4 +17,8 @@ Every future contract change requires a focused contract test and an entry here.
 - Deterministic-repeat comparison is semantic rather than raw Parquet bytes because physical encodings and metadata are not scorer-visible and may vary while the required table is identical.
 - Randomized differential tests use the published generator's smallest supported dataset of 1,000 events and compare against the unchanged V1 Polars pipeline.
 - The `app` crate is a fail-closed submission-shell stub only.
-- Parsing, identity construction, reduction, sweeping, output writing, orchestration, and optimization remain unimplemented for their later slices.
+- At the Slice 0 freeze, parsing, identity construction, reduction, sweeping, output writing, orchestration, and optimization were reserved for later slices.
+
+## Slice 2 - 2026-11-20
+
+- The registration and singleton semantics are clarified in the authoritative `Canonicalize` trait documentation in `v2/crates/domain/src/compact.rs`; the frozen cross-slice behavior is unchanged.

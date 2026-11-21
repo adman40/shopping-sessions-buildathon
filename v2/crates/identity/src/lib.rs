@@ -132,9 +132,8 @@ impl IdentityBuilder {
 
         let mut sorted_old_ids = Vec::with_capacity(id_count);
         for id in 0..id_count {
-            sorted_old_ids.push(
-                u32::try_from(id).map_err(|_| resource_error("too many identity IDs"))?,
-            );
+            sorted_old_ids
+                .push(u32::try_from(id).map_err(|_| resource_error("too many identity IDs"))?);
         }
         sorted_old_ids
             .sort_unstable_by(|left, right| self.ids.bytes(*left).cmp(self.ids.bytes(*right)));
@@ -153,8 +152,7 @@ impl IdentityBuilder {
                 .checked_add(self.ids.bytes(*id).len())
                 .ok_or_else(|| resource_error("identity byte arena size overflow"))
         })?;
-        let mut frozen_ids =
-            ExactByteIndex::with_capacity(id_count, total_bytes, self.ids.hasher)?;
+        let mut frozen_ids = ExactByteIndex::with_capacity(id_count, total_bytes, self.ids.hasher)?;
         let mut old_to_sorted = vec![NO_INDEX; id_count];
         for old_id in &sorted_old_ids {
             let sorted_id = frozen_ids.insert(self.ids.bytes(*old_id))?;
@@ -284,11 +282,7 @@ impl ExactByteIndex {
         }
     }
 
-    fn with_capacity(
-        ids: usize,
-        bytes: usize,
-        hasher: ByteHasher,
-    ) -> Result<Self, PipelineError> {
+    fn with_capacity(ids: usize, bytes: usize, hasher: ByteHasher) -> Result<Self, PipelineError> {
         let hash_capacity = hash_capacity_for(ids)
             .ok_or_else(|| resource_error("identity hash index capacity overflow"))?;
         Ok(Self {
@@ -397,11 +391,7 @@ impl ExactByteIndex {
         self.bytes
             .capacity()
             .saturating_add(self.spans.capacity().saturating_mul(size_of::<ByteSpan>()))
-            .saturating_add(
-                self.hash_slots
-                    .capacity()
-                    .saturating_mul(size_of::<u32>()),
-            )
+            .saturating_add(self.hash_slots.capacity().saturating_mul(size_of::<u32>()))
     }
 
     fn estimated_frozen_heap_bytes(&self) -> usize {
