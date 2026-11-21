@@ -1,3 +1,4 @@
 benchmark-results/
 .benchmark-data/
+__pycache__/
 generator/target/

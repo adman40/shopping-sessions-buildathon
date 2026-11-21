@@ -8,7 +8,7 @@ DEV   ?= dev
 FIXTURES ?= $(if $(wildcard fixtures),fixtures,../../fixtures)
 export IMAGE CPUS MEM PLATFORM
 
-.PHONY: build fixtures dev run-dev check-dev
+.PHONY: build fixtures dev run-dev check-dev bench-vm-test bench-vm-plan
 
 ## Build the image for the scorer's platform, linux/amd64 (emulated on Apple silicon)
 build:
@@ -30,3 +30,15 @@ run-dev: build
 ANSWER ?= dev-answer
 check-dev:
 	python3 scripts/compare.py out $(ANSWER)
+
+## Run the dedicated VM harness unit and shell tests (no cloud or Docker access)
+bench-vm-test:
+	python3 -m unittest discover -s bench/vm/tests -p 'test_*.py' -v
+	bash bench/vm/tests/test_cli.sh
+
+## Print the exact VM command plan without performing any work
+BENCH_SHA ?= 8a35b964aed48ecba5e44d061606b2a4bb9a2239
+BENCH_EVENTS ?= 100000
+BENCH_CLICKS ?= 25000
+bench-vm-plan:
+	python3 bench/vm/shopping_bench.py plan --sha $(BENCH_SHA) --events $(BENCH_EVENTS) --clicks $(BENCH_CLICKS)
