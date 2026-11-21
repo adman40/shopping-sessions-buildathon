@@ -763,7 +763,12 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "shopping-sessions-app"
 version = "0.1.0"
 dependencies = [
+ "serde_json",
  "shopping-sessions-domain",
+ "shopping-sessions-output",
+ "shopping-sessions-parser",
+ "shopping-sessions-reduce",
+ "shopping-sessions-sweep",
 ]
 
 [[package]]

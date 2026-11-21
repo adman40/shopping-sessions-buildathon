@@ -214,14 +214,12 @@ fn load_catalog(path: &Path, name: &str) -> Result<ByteCatalog, PipelineError> {
         }
         row_number += 1;
         match parse_fixed_fields::<2>(line) {
-            ParseOutcome::Accepted(fields) => match append_fixed_fields(
-                &mut arena,
-                &fields,
-                u32::MAX as usize,
-            ) {
-                Some(spans) => entries.push((spans[0], spans[1])),
-                None => failure = Some((ParseStatus::ArenaOverflow, row_number)),
-            },
+            ParseOutcome::Accepted(fields) => {
+                match append_fixed_fields(&mut arena, &fields, u32::MAX as usize) {
+                    Some(spans) => entries.push((spans[0], spans[1])),
+                    None => failure = Some((ParseStatus::ArenaOverflow, row_number)),
+                }
+            }
             ParseOutcome::Rejected(status) => failure = Some((status, row_number)),
         }
     });
@@ -282,7 +280,7 @@ mod tests {
 
         let mut header_only = Vec::new();
         for_each_data_line(b"header\n", |line| header_only.push(line.to_vec()));
-        assert!(header_only.is_empty());
+        assert_eq!(header_only, Vec::<Vec<u8>>::new());
     }
 
     #[test]
@@ -316,8 +314,11 @@ mod tests {
         assert_eq!(batches[0].arena(), b"abccdd");
         assert_eq!(batches[1].arena(), b"eeefgh");
         assert_eq!(batches[2].arena(), b"iijj");
-        assert!(batches.iter().flat_map(|batch| &batch.rows).all(|row| {
-            !matches!(row, ParseOutcome::Rejected(ParseStatus::ArenaOverflow))
-        }));
+        assert!(
+            batches
+                .iter()
+                .flat_map(|batch| &batch.rows)
+                .all(|row| { !matches!(row, ParseOutcome::Rejected(ParseStatus::ArenaOverflow)) })
+        );
     }
 }

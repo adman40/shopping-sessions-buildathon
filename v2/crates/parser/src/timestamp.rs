@@ -31,6 +31,7 @@ pub enum WindowClassification {
 }
 
 /// Event and click windows derived from the manifest.
+#[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimestampWindow {
     start_ms: i64,

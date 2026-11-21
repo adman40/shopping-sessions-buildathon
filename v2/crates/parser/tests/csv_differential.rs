@@ -14,12 +14,12 @@ fn reference(line: &[u8], width: usize) -> ParseOutcome<Vec<&[u8]>> {
         let value = match (piece.first(), piece.last()) {
             (Some(b'"'), Some(b'"')) if piece.len() >= 2 => {
                 let inside = &piece[1..piece.len() - 1];
-                if inside.iter().any(|byte| *byte == b'"') {
+                if inside.contains(&b'"') {
                     return ParseOutcome::Rejected(ParseStatus::MisplacedQuote);
                 }
                 inside
             }
-            _ if piece.iter().any(|byte| *byte == b'"') => {
+            _ if piece.contains(&b'"') => {
                 return ParseOutcome::Rejected(ParseStatus::MisplacedQuote);
             }
             _ => piece,

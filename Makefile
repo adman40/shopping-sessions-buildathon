@@ -35,8 +35,9 @@ V2_IMAGE ?= shopping-sessions-v2:latest
 V2_CANDIDATE ?= v2/docker_run.sh
 V2_DEV ?= dev
 V2_ANSWER ?= dev-answer
+V2_FAILURE_LOG_DIR ?= benchmark-results/v2-failures
 
-.PHONY: v2-build v2-test v2-dev v2-differential v2-benchmark
+.PHONY: v2-build v2-test v2-dev v2-differential v2-benchmark v2-full
 
 ## Build the Slice 0 V2 Rust submission shell
 v2-build:
@@ -55,8 +56,14 @@ v2-dev:
 
 ## Compare randomized small candidate outputs with the V1 Polars oracle
 v2-differential:
-	IMAGE=$(V2_IMAGE) python3 scripts/v2_differential.py --candidate '$(V2_CANDIDATE)'
+	mkdir -p "$(V2_FAILURE_LOG_DIR)"
+	V2_FAILURE_LOG_DIR="$(abspath $(V2_FAILURE_LOG_DIR))" IMAGE=$(V2_IMAGE) python3 scripts/v2_differential.py --candidate '$(V2_CANDIDATE)'
 
 ## Report timing only after every V2 correctness and telemetry gate passes
 v2-benchmark:
-	IMAGE=$(V2_IMAGE) python3 scripts/v2_benchmark.py --candidate '$(V2_CANDIDATE)' --fixtures $(FIXTURES) --dev-data $(V2_DEV) --dev-answer $(V2_ANSWER)
+	mkdir -p "$(V2_FAILURE_LOG_DIR)"
+	V2_FAILURE_LOG_DIR="$(abspath $(V2_FAILURE_LOG_DIR))" IMAGE=$(V2_IMAGE) python3 scripts/v2_benchmark.py --candidate '$(V2_CANDIDATE)' --fixtures $(FIXTURES) --dev-data $(V2_DEV) --dev-answer $(V2_ANSWER)
+
+## Run workspace checks, build the candidate, then invoke the complete correctness-gated harness
+v2-full: v2-test v2-build
+	$(MAKE) v2-benchmark

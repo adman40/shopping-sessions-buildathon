@@ -9,6 +9,11 @@ DATA=$(cd "$1" && pwd)
 mkdir -p "$2"
 OUT=$(cd "$2" && pwd)
 REMOVE_SCRATCH=0
+FAILURE_LOG_DIR=""
+if [ -n "${V2_FAILURE_LOG_DIR:-}" ]; then
+  mkdir -p "$V2_FAILURE_LOG_DIR"
+  FAILURE_LOG_DIR=$(cd "$V2_FAILURE_LOG_DIR" && pwd)
+fi
 if [ -n "${SCRATCH_DIR:-}" ]; then
   mkdir -p "$SCRATCH_DIR"
   SCRATCH=$(cd "$SCRATCH_DIR" && pwd)
@@ -25,6 +30,10 @@ release() {
   fi
   if [ -n "${V2_TELEMETRY_PATH:-}" ] && [ -f "$SCRATCH/v2-telemetry.json" ]; then
     cp "$SCRATCH/v2-telemetry.json" "$V2_TELEMETRY_PATH"
+  fi
+  if [ -n "$FAILURE_LOG_DIR" ] && [ -d "$SCRATCH/v2-failures" ]; then
+    FAILURE_RUN_DIR=$(mktemp -d "$FAILURE_LOG_DIR/run.XXXXXX")
+    cp -R "$SCRATCH/v2-failures/." "$FAILURE_RUN_DIR/"
   fi
   if [ "$REMOVE_SCRATCH" -eq 1 ]; then
     rm -rf "$SCRATCH" 2>/dev/null || true

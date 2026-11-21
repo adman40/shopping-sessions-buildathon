@@ -40,14 +40,16 @@ fn resolved<T>(
 ) -> Vec<ParseOutcome<Vec<Vec<u8>>>> {
     let mut rows = Vec::new();
     for batch in batches {
-        rows.extend(batch.rows.iter().map(|outcome| match outcome {
-            ParseOutcome::Accepted(row) => ParseOutcome::Accepted(
-                spans(row)
-                    .into_iter()
-                    .map(|span| batch.resolve(span).unwrap().to_vec())
-                    .collect(),
-            ),
-            ParseOutcome::Rejected(status) => ParseOutcome::Rejected(*status),
+        rows.extend(batch.rows.iter().map(|outcome| {
+            match outcome {
+                ParseOutcome::Accepted(row) => ParseOutcome::Accepted(
+                    spans(row)
+                        .into_iter()
+                        .map(|span| batch.resolve(span).unwrap().to_vec())
+                        .collect(),
+                ),
+                ParseOutcome::Rejected(status) => ParseOutcome::Rejected(*status),
+            }
         }));
     }
     rows
