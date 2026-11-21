@@ -31,7 +31,7 @@ code_type!(
 );
 code_type!(
     EventPayloadCode,
-    "Index into a CompactEventBatch payload table."
+    "Index into a `CompactEventBatch` payload table."
 );
 
 /// Canonical identity result. The identity slice owns the name arena.
