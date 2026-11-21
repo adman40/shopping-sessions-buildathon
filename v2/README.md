@@ -1,7 +1,8 @@
 # V2 Rust foundation
 
 Slice 0 freezes the cross-slice contracts in `crates/domain` and provides a fail-closed `app` shell.
-The app intentionally does not process data until later implementation slices land.
+Slice 5 implements the ordered per-person session, attribution, assist, and aggregate kernel in `crates/sweep` against compact reducer batches.
+The app intentionally does not process data until the remaining execution slices are integrated.
 Contract changes require tests and an entry in `../docs/V2_DECISION_LOG.md`.
 
 ## Ownership
@@ -14,7 +15,7 @@ Contract changes require tests and an entry in `../docs/V2_DECISION_LOG.md`.
 
 ## Validation commands
 
-Run the Slice 0 contract and harness tests plus configured Rust format and lint checks:
+Run the V2 workspace's contract, sweep, and harness tests plus configured Rust format and lint checks:
 
 ```sh
 make v2-test
