@@ -2,7 +2,7 @@
 
 ## Goal and non-goals
 
-V2 replaces the scored Polars data path with a compact Rust pipeline. It keeps the current `main` branch as the known-good, submit-ready Polars baseline. All V2 work starts on `v2-rust-plan` and is submitted only after it passes the same gates.
+V2 replaces the scored Polars data path with a compact Rust pipeline. It keeps the current `main` branch as the known-good, submit-ready Polars baseline. Slice 0 contracts are frozen on the published `v2/slice0-contracts` branch; independent slices branch from that contract on V2-prefixed branches and are submitted only after they pass the same gates.
 
 The objective is a correct pipeline with a measured x86-64 Linux runtime below 150 seconds, leaving margin below the 180-second limit. The research estimate is 114 seconds; that is a planning hypothesis, not a target we assume is achieved.
 
