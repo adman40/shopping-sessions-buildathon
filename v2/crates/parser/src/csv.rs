@@ -71,12 +71,13 @@ pub(crate) fn parse_fixed_fields<const N: usize>(line: &[u8]) -> ParseOutcome<[&
 pub(crate) fn append_fixed_fields<const N: usize>(
     arena: &mut Vec<u8>,
     fields: &[&[u8]; N],
+    arena_limit: usize,
 ) -> Option<[ByteSpan; N]> {
     let additional = fields
         .iter()
         .try_fold(0_usize, |total, field| total.checked_add(field.len()))?;
     let final_length = arena.len().checked_add(additional)?;
-    if final_length > u32::MAX as usize {
+    if final_length > arena_limit || final_length > u32::MAX as usize {
         return None;
     }
 

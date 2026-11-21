@@ -35,13 +35,12 @@ fn reference_rows(paths: &[PathBuf], width: usize) -> Vec<ParseOutcome<Vec<Vec<u
 }
 
 fn resolved<T>(
-    batch: &ParsedBatch<T>,
+    batches: &[ParsedBatch<T>],
     spans: impl Fn(&T) -> Vec<ByteSpan>,
 ) -> Vec<ParseOutcome<Vec<Vec<u8>>>> {
-    batch
-        .rows
-        .iter()
-        .map(|outcome| match outcome {
+    let mut rows = Vec::new();
+    for batch in batches {
+        rows.extend(batch.rows.iter().map(|outcome| match outcome {
             ParseOutcome::Accepted(row) => ParseOutcome::Accepted(
                 spans(row)
                     .into_iter()
@@ -49,8 +48,9 @@ fn resolved<T>(
                     .collect(),
             ),
             ParseOutcome::Rejected(status) => ParseOutcome::Rejected(*status),
-        })
-        .collect()
+        }));
+    }
+    rows
 }
 
 #[test]
@@ -73,18 +73,18 @@ fn every_fixture_field_and_status_matches_the_reference() {
 }
 
 fn compare_links(input: &DiscoveredInput, case: &str) {
-    let batch = parse_links(&input.link_files).unwrap();
+    let batches = parse_links(&input.link_files).unwrap();
     assert_eq!(
-        resolved(&batch, |row| vec![row.user_id_a, row.user_id_b]),
+        resolved(&batches, |row| vec![row.user_id_a, row.user_id_b]),
         reference_rows(&input.link_files, 2),
         "links in {case}"
     );
 }
 
 fn compare_events(input: &DiscoveredInput, case: &str) {
-    let batch = parse_events(&input.event_files).unwrap();
+    let batches = parse_events(&input.event_files).unwrap();
     assert_eq!(
-        resolved(&batch, |row| vec![
+        resolved(&batches, |row| vec![
             row.event_id,
             row.user_id,
             row.timestamp,
@@ -99,9 +99,9 @@ fn compare_events(input: &DiscoveredInput, case: &str) {
 }
 
 fn compare_clicks(input: &DiscoveredInput, case: &str) {
-    let batch = parse_clicks(&input.click_files).unwrap();
+    let batches = parse_clicks(&input.click_files).unwrap();
     assert_eq!(
-        resolved(&batch, |row| vec![
+        resolved(&batches, |row| vec![
             row.click_id,
             row.user_id,
             row.campaign_id,
@@ -116,20 +116,20 @@ fn compare_clicks(input: &DiscoveredInput, case: &str) {
 fn malformed_fixture_lines_retain_specific_statuses() {
     let input = fixture_root().join("L3/input");
     let discovered = discover_input(&input).unwrap();
-    let batch = parse_links(&discovered.link_files).unwrap();
-    assert!(
+    let batches = parse_links(&discovered.link_files).unwrap();
+    assert!(batches.iter().any(|batch| {
         batch
             .rows
             .contains(&ParseOutcome::Rejected(ParseStatus::EmptyLine))
-    );
-    assert!(
+    }));
+    assert!(batches.iter().any(|batch| {
         batch
             .rows
             .contains(&ParseOutcome::Rejected(ParseStatus::WrongFieldCount))
-    );
-    assert!(
+    }));
+    assert!(batches.iter().any(|batch| {
         batch
             .rows
             .contains(&ParseOutcome::Rejected(ParseStatus::MisplacedQuote))
-    );
+    }));
 }

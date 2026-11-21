@@ -42,7 +42,7 @@ pub struct Manifest {
 /// # Errors
 ///
 /// Returns an I/O error if any file cannot be read.
-pub fn parse_links(paths: &[PathBuf]) -> Result<ParsedBatch<RawLink>, PipelineError> {
+pub fn parse_links(paths: &[PathBuf]) -> Result<Vec<ParsedBatch<RawLink>>, PipelineError> {
     parse_typed_rows::<_, _, 2>(paths, Phase::Links, |spans| RawLink {
         user_id_a: spans[0],
         user_id_b: spans[1],
@@ -54,7 +54,7 @@ pub fn parse_links(paths: &[PathBuf]) -> Result<ParsedBatch<RawLink>, PipelineEr
 /// # Errors
 ///
 /// Returns an I/O error if any file cannot be read.
-pub fn parse_events(paths: &[PathBuf]) -> Result<ParsedBatch<RawEvent>, PipelineError> {
+pub fn parse_events(paths: &[PathBuf]) -> Result<Vec<ParsedBatch<RawEvent>>, PipelineError> {
     parse_typed_rows::<_, _, 7>(paths, Phase::Events, |spans| RawEvent {
         event_id: spans[0],
         user_id: spans[1],
@@ -71,7 +71,7 @@ pub fn parse_events(paths: &[PathBuf]) -> Result<ParsedBatch<RawEvent>, Pipeline
 /// # Errors
 ///
 /// Returns an I/O error if any file cannot be read.
-pub fn parse_clicks(paths: &[PathBuf]) -> Result<ParsedBatch<RawClick>, PipelineError> {
+pub fn parse_clicks(paths: &[PathBuf]) -> Result<Vec<ParsedBatch<RawClick>>, PipelineError> {
     parse_typed_rows::<_, _, 4>(paths, Phase::Clicks, |spans| RawClick {
         click_id: spans[0],
         user_id: spans[1],
@@ -157,26 +157,49 @@ fn parse_typed_rows<T, F, const N: usize>(
     paths: &[PathBuf],
     phase: Phase,
     build: F,
-) -> Result<ParsedBatch<T>, PipelineError>
+) -> Result<Vec<ParsedBatch<T>>, PipelineError>
 where
     F: Fn(&[ByteSpan; N]) -> T,
 {
+    parse_typed_rows_with_limit(paths, phase, u32::MAX as usize, build)
+}
+
+fn parse_typed_rows_with_limit<T, F, const N: usize>(
+    paths: &[PathBuf],
+    phase: Phase,
+    arena_limit: usize,
+    build: F,
+) -> Result<Vec<ParsedBatch<T>>, PipelineError>
+where
+    F: Fn(&[ByteSpan; N]) -> T,
+{
+    let mut batches = Vec::new();
     let mut arena = Vec::new();
     let mut rows = Vec::new();
     for path in paths {
         let bytes = fs::read(path).map_err(|error| io_error(phase, path, &error))?;
         for_each_data_line(&bytes, |line| match parse_fixed_fields::<N>(line) {
             ParseOutcome::Accepted(fields) => {
-                if let Some(spans) = append_fixed_fields(&mut arena, &fields) {
-                    rows.push(ParseOutcome::Accepted(build(&spans)));
-                } else {
-                    rows.push(ParseOutcome::Rejected(ParseStatus::ArenaOverflow));
+                let mut spans = append_fixed_fields(&mut arena, &fields, arena_limit);
+                if spans.is_none() && !arena.is_empty() {
+                    batches.push(ParsedBatch::new(
+                        std::mem::take(&mut arena),
+                        std::mem::take(&mut rows),
+                    ));
+                    spans = append_fixed_fields(&mut arena, &fields, arena_limit);
+                }
+                match spans {
+                    Some(spans) => rows.push(ParseOutcome::Accepted(build(&spans))),
+                    None => rows.push(ParseOutcome::Rejected(ParseStatus::ArenaOverflow)),
                 }
             }
             ParseOutcome::Rejected(status) => rows.push(ParseOutcome::Rejected(status)),
         });
     }
-    Ok(ParsedBatch::new(arena, rows))
+    if !rows.is_empty() || batches.is_empty() {
+        batches.push(ParsedBatch::new(arena, rows));
+    }
+    Ok(batches)
 }
 
 fn load_catalog(path: &Path, name: &str) -> Result<ByteCatalog, PipelineError> {
@@ -191,7 +214,11 @@ fn load_catalog(path: &Path, name: &str) -> Result<ByteCatalog, PipelineError> {
         }
         row_number += 1;
         match parse_fixed_fields::<2>(line) {
-            ParseOutcome::Accepted(fields) => match append_fixed_fields(&mut arena, &fields) {
+            ParseOutcome::Accepted(fields) => match append_fixed_fields(
+                &mut arena,
+                &fields,
+                u32::MAX as usize,
+            ) {
                 Some(spans) => entries.push((spans[0], spans[1])),
                 None => failure = Some((ParseStatus::ArenaOverflow, row_number)),
             },
@@ -256,5 +283,41 @@ mod tests {
         let mut header_only = Vec::new();
         for_each_data_line(b"header\n", |line| header_only.push(line.to_vec()));
         assert!(header_only.is_empty());
+    }
+
+    #[test]
+    fn accepted_rows_continue_in_a_new_arena_batch() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "shopping-sessions-parser-batches-{}-{nonce}.csv",
+            std::process::id()
+        ));
+        fs::write(&path, b"a,b\na,b\nbad\ncc,dd\neee,f\ng,h\nii,jj\n").unwrap();
+
+        let batches = parse_typed_rows_with_limit::<RawLink, _, 2>(
+            std::slice::from_ref(&path),
+            Phase::Links,
+            6,
+            |spans| RawLink {
+                user_id_a: spans[0],
+                user_id_b: spans[1],
+            },
+        )
+        .unwrap();
+        fs::remove_file(path).unwrap();
+
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].rows.len(), 3);
+        assert_eq!(batches[1].rows.len(), 2);
+        assert_eq!(batches[2].rows.len(), 1);
+        assert_eq!(batches[0].arena(), b"abccdd");
+        assert_eq!(batches[1].arena(), b"eeefgh");
+        assert_eq!(batches[2].arena(), b"iijj");
+        assert!(batches.iter().flat_map(|batch| &batch.rows).all(|row| {
+            !matches!(row, ParseOutcome::Rejected(ParseStatus::ArenaOverflow))
+        }));
     }
 }

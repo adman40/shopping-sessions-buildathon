@@ -88,18 +88,22 @@ fn each_file_loses_exactly_its_first_physical_line() {
 
     let discovered = discover_input(directory.path()).unwrap();
     let parsed = parse_events(&discovered.event_files).unwrap();
-    assert_eq!(parsed.rows.len(), 2);
-    let ParseOutcome::Accepted(first) = parsed.rows[0] else {
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].rows.len(), 2);
+    let ParseOutcome::Accepted(first) = parsed[0].rows[0] else {
         panic!("first row should be grammar-valid");
     };
-    assert_eq!(parsed.resolve(first.event_id), Some(&b"e1"[..]));
-    assert_eq!(parsed.resolve(first.price_cents), Some(&b"\r"[..]));
+    assert_eq!(parsed[0].resolve(first.event_id), Some(&b"e1"[..]));
+    assert_eq!(parsed[0].resolve(first.price_cents), Some(&b"\r"[..]));
 
-    let ParseOutcome::Accepted(second) = parsed.rows[1] else {
+    let ParseOutcome::Accepted(second) = parsed[0].rows[1] else {
         panic!("semantic dirt must survive grammar parsing");
     };
-    assert_eq!(parsed.resolve(second.timestamp), Some(&b""[..]));
-    assert_eq!(parsed.resolve(second.ingest_timestamp), Some(&b"bad"[..]));
+    assert_eq!(parsed[0].resolve(second.timestamp), Some(&b""[..]));
+    assert_eq!(
+        parsed[0].resolve(second.ingest_timestamp),
+        Some(&b"bad"[..])
+    );
 }
 
 #[test]
