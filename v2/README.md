@@ -2,10 +2,11 @@
 
 Slice 0 freezes the cross-slice contracts in `crates/domain`.
 Slice 1 adds exact input discovery, CSV and timestamp parsing, and catalog and manifest loading in `crates/parser`.
+Slice 2 implements the deterministic identity graph and canonicalization in `crates/identity`.
 Slice 4 implements the click reducer in `crates/reduce` against those contracts; see the [V2 implementation plan](../docs/V2_IMPLEMENTATION_PLAN.md) for its detailed boundary.
 Slice 5 implements the ordered per-person session, attribution, assist, and aggregate kernel in `crates/sweep` against compact reducer batches.
 Slice 6 provides the native Parquet writer and staged publication in `crates/output`.
-The shadow `app` links every available crate but remains fail-closed until Slice 2 identity and Slice 3 event reduction are integrated.
+The shadow `app` links every available crate but remains fail-closed until Slice 3 event reduction is integrated.
 Contract changes require tests and an entry in `../docs/V2_DECISION_LOG.md`.
 
 ## Ownership

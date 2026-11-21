@@ -16,10 +16,15 @@ if [ -n "${V2_FAILURE_LOG_DIR:-}" ]; then
 fi
 if [ -n "${SCRATCH_DIR:-}" ]; then
   mkdir -p "$SCRATCH_DIR"
-  SCRATCH=$(cd "$SCRATCH_DIR" && pwd)
+  SCRATCH=$(cd "$SCRATCH_DIR" && pwd -P)
 else
   SCRATCH=$(mktemp -d)
   REMOVE_SCRATCH=1
+fi
+TELEMETRY=
+if [ -n "${V2_TELEMETRY_PATH:-}" ]; then
+  TELEMETRY_DIR=$(cd "$(dirname "$V2_TELEMETRY_PATH")" && pwd -P)
+  TELEMETRY="$TELEMETRY_DIR/$(basename "$V2_TELEMETRY_PATH")"
 fi
 chmod 777 "$OUT" "$SCRATCH"
 release() {
@@ -28,8 +33,11 @@ release() {
       -v "$OUT":/output:z -v "$SCRATCH":/scratch:z --entrypoint chmod "$IMAGE" \
       -R a+rwX /output /scratch >/dev/null 2>&1 || true
   fi
-  if [ -n "${V2_TELEMETRY_PATH:-}" ] && [ -f "$SCRATCH/v2-telemetry.json" ]; then
-    cp "$SCRATCH/v2-telemetry.json" "$V2_TELEMETRY_PATH"
+  TELEMETRY_SOURCE="$SCRATCH/v2-telemetry.json"
+  if [ -n "$TELEMETRY" ] && [ -f "$TELEMETRY_SOURCE" ] && \
+    [ "$TELEMETRY_SOURCE" != "$TELEMETRY" ] && \
+    { [ ! -f "$TELEMETRY" ] || [ ! "$TELEMETRY_SOURCE" -ef "$TELEMETRY" ]; }; then
+    cp "$TELEMETRY_SOURCE" "$TELEMETRY"
   fi
   if [ -n "$FAILURE_LOG_DIR" ] && [ -d "$SCRATCH/v2-failures" ]; then
     FAILURE_RUN_DIR=$(mktemp -d "$FAILURE_LOG_DIR/run.XXXXXX")

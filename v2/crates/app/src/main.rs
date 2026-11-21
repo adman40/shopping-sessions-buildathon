@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use serde_json::{Value, json};
 use shopping_sessions_domain::{PipelineError, PipelineErrorKind};
+use shopping_sessions_identity as _;
 use shopping_sessions_output as _;
 use shopping_sessions_parser as _;
 use shopping_sessions_reduce as _;
@@ -34,7 +35,7 @@ fn run() -> Result<(), PipelineError> {
     }
     Err(PipelineError::new(
         PipelineErrorKind::NotImplemented,
-        "shadow integration is incomplete: Slice 2 identity and Slice 3 event reduction are not integrated",
+        "shadow integration is incomplete: Slice 3 event reduction is not integrated",
     ))
 }
 

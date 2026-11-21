@@ -765,6 +765,7 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "shopping-sessions-domain",
+ "shopping-sessions-identity",
  "shopping-sessions-output",
  "shopping-sessions-parser",
  "shopping-sessions-reduce",
@@ -777,6 +778,13 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "shopping-sessions-identity"
+version = "0.1.0"
+dependencies = [
+ "shopping-sessions-domain",
 ]
 
 [[package]]

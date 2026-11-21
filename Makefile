@@ -39,7 +39,7 @@ V2_FAILURE_LOG_DIR ?= benchmark-results/v2-failures
 
 .PHONY: v2-build v2-test v2-dev v2-differential v2-benchmark v2-full
 
-## Build the Slice 0 V2 Rust submission shell
+## Build the V2 Rust submission shell
 v2-build:
 	docker buildx build --platform $(PLATFORM) --load -f v2/Dockerfile -t $(V2_IMAGE) .
 
