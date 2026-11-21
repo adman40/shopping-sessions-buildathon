@@ -1,3 +1,4 @@
 benchmark-results/
 .benchmark-data/
 generator/target/
+v2/target/

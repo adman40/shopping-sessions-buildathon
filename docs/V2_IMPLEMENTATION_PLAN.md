@@ -118,12 +118,12 @@ Any contract change requires fixture tests and an updated entry in the decision 
 
 **Owns:** click dedup, validation, campaign lookup, and compact-click emission in `reduce`.
 
-**Research applied:** research 06/09's exact click ID dedup, valid-click window, and retained byte handle for same-time click-ID ties.
+**Research applied:** research 06/09's exact click ID dedup, valid-click window, and retained click-ID bytes for same-time ties.
 
 **Deliverables:**
 - Exact click-ID dedup with collision-safe equality.
 - Validation after dedup, canonical person mapping, campaign-code lookup, and compact click rows.
-- Click-ID byte handle retained solely for tie resolution.
+- Batch-owned click-ID bytes remain resolvable solely for tie resolution.
 
 **Acceptance:** click window boundary, unknown campaign, quoted-duplicate, and same-timestamp tie tests pass.
 
