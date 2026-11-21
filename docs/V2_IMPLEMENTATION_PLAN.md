@@ -107,7 +107,7 @@ Any contract change requires fixture tests and an updated entry in the decision 
 **Deliverables:**
 - Exact event-ID winner selection with collision-safe equality.
 - Validation only after the winner is selected, including late-event behavior.
-- Canonical-person and product/category resolution, then compact event records.
+- Canonical-person resolution for every survivor and category lookup for purchases, then compact event records.
 - Explicit release of event-ID winner state before sorting.
 
 **Acceptance:** all event fixtures pass, especially invalid-earliest duplicate cases; survivor counters reconcile with inputs; compact record layout is asserted in tests.
