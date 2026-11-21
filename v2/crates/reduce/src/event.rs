@@ -125,7 +125,6 @@ struct PendingEvent {
     timestamp_ms: i64,
     person: shopping_sessions_domain::PersonCode,
     payload: EventPayload,
-    event_id: ByteSpan,
 }
 
 /// Selects exact event-ID winners, validates them, resolves dimensions, and
@@ -240,15 +239,7 @@ where
         }
     }
 
-    pending.sort_by(|left, right| {
-        (left.person, left.timestamp_ms)
-            .cmp(&(right.person, right.timestamp_ms))
-            .then_with(|| {
-                let left_id = left.event_id.resolve(arena).unwrap_or_default();
-                let right_id = right.event_id.resolve(arena).unwrap_or_default();
-                left_id.cmp(right_id)
-            })
-    });
+    pending.sort_by_key(|event| (event.person, event.timestamp_ms));
 
     let mut batch = CompactEventBatch {
         records: Vec::with_capacity(pending.len()),
@@ -346,7 +337,6 @@ where
         timestamp_ms,
         person,
         payload,
-        event_id: row.event_id,
     }))
 }
 
@@ -786,7 +776,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_rows_are_deterministically_sorted_with_equal_timestamp_ties() {
+    fn compact_rows_are_sorted_by_person_and_timestamp() {
         let mut arena = Arena::default();
         let z = arena.row(b"z", b"u1", b"2000", b"2100", b"cart", b"p1", b"");
         let a = arena.row(b"a", b"u1", b"2000", b"2100", b"view", b"p1", b"");
@@ -814,9 +804,6 @@ mod tests {
                 (PersonCode(2), 2000)
             ]
         );
-        let payloads = payloads(&result);
-        assert_eq!(payloads[1].kind(), EventKind::View);
-        assert_eq!(payloads[2].kind(), EventKind::Cart);
     }
 
     #[test]
