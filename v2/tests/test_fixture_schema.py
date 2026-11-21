@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Behavioral tests for output value-nullability validation."""
+"""Behavioral tests for candidate output schema validation and loading."""
 
 from datetime import date
 from pathlib import Path

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exact, order-insensitive diff of two output folders."""
+"""Exact, order-insensitive diff of Parquet outputs or a right-side CSV reference."""
 import argparse
 from pathlib import Path
 import sys

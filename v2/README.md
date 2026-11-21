@@ -14,12 +14,10 @@ Contract changes require tests and an entry in `../docs/V2_DECISION_LOG.md`.
 
 ## Validation commands
 
-Run contract tests and lint:
+Run the Slice 0 contract and harness tests plus configured Rust format and lint checks:
 
 ```sh
-cargo test --manifest-path v2/Cargo.toml
-cargo clippy --manifest-path v2/Cargo.toml --all-targets -- -D warnings
-cargo fmt --manifest-path v2/Cargo.toml --check
+make v2-test
 ```
 
 Generate the provenance-certified 1M development data:

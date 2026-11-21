@@ -126,8 +126,8 @@ pub struct CompactEvent {
 
 /// The reducer-to-sweep click record, fixed at 16 bytes.
 ///
-/// Its click ID is retained in the owning batch's parallel `click_ids` sidecar,
-/// solely for exact same-timestamp bytewise tie resolution.
+/// Its click-ID span is retained in the owning batch's parallel `click_ids` sidecar
+/// and resolves into batch-owned bytes solely for exact same-timestamp tie resolution.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub struct CompactClick {
