@@ -4,6 +4,7 @@ members = [
     "crates/domain",
     "crates/parser",
     "crates/reduce",
+    "crates/sweep",
 ]
 resolver = "2"
 
