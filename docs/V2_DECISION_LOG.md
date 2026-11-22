@@ -16,5 +16,13 @@ Every future contract change requires a focused contract test and an entry here.
 - The exact development scale and 0.5% harness-overhead ceiling are fixed acceptance criteria, not command-line options.
 - Deterministic-repeat comparison is semantic rather than raw Parquet bytes because physical encodings and metadata are not scorer-visible and may vary while the required table is identical.
 - Randomized differential tests use the published generator's smallest supported dataset of 1,000 events and compare against the unchanged V1 Polars pipeline.
-- The `app` crate is a fail-closed submission-shell stub only.
+- At the Slice 0 freeze, the `app` crate was a fail-closed submission-shell stub only.
 - At the Slice 0 freeze, parsing, identity construction, reduction, sweeping, output writing, orchestration, and optimization remained deferred to their later slices.
+
+## Slice 2 - 2026-11-20
+
+- The registration and singleton semantics are clarified in the authoritative `Canonicalize` trait documentation in `v2/crates/domain/src/compact.rs`; the frozen cross-slice behavior is unchanged.
+
+## Slice 6 - 2026-11-20
+
+- Physical schema and publication details are now frozen by the [Slice 6 output contract](V2_IMPLEMENTATION_PLAN.md#slice-6--parquet-output-and-publication-contract); required fields are physically required and only `user_daily.top_category` is optional.

@@ -10,7 +10,13 @@ name = "shopping-sessions-v2"
 path = "src/main.rs"
 
 [dependencies]
+serde_json.workspace = true
 shopping-sessions-domain.workspace = true
+shopping-sessions-identity = { path = "../identity" }
+shopping-sessions-output = { path = "../output" }
+shopping-sessions-parser = { path = "../parser" }
+shopping-sessions-reduce = { path = "../reduce" }
+shopping-sessions-sweep = { path = "../sweep" }
 
 [lints]
 workspace = true

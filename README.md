@@ -1,16 +1,16 @@
 # Shopping Sessions Buildathon
 
-A complete Polars baseline for the Shopping Sessions Buildathon. It builds a `linux/amd64` image, runs within the scorer's container limits, and writes both required Parquet output tables. The implementation passes all 36 included correctness fixtures.
+A complete Rust V2 candidate for the Shopping Sessions Buildathon. The repository-root Dockerfile builds a `linux/amd64` image, runs within the scorer's container limits, and writes both required Parquet output tables.
 
 If this starter and `rules.md` ever disagree, `rules.md` wins. Ask the organizers if `rules.md` leaves you unsure.
 
-V2 Rust work is isolated under `v2/` on V2-prefixed branches. See `v2/README.md` for the frozen Slice 0 contracts and correctness-gated benchmark; the root Dockerfile and Python pipeline remain the V1 baseline.
+The scorer-facing repository-root Dockerfile runs the Rust application under `v2/`. See `v2/README.md` for implementation status and validation commands; the unchanged Python pipeline remains the V1 differential oracle.
 
 ## Iteration workflow
 
 - Read `rules.md` before changing behavior.
-- Update `pipeline/pipeline.py`.
-- Run all 36 fixtures and the 1M-event development check before submitting a commit SHA.
+- Update the relevant Rust crate under `v2/crates/`.
+- Run all 36 fixtures, randomized V1 differentials, and the 1M-event correctness gates before submitting a commit SHA.
 
 ## Run and test locally
 
