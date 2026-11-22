@@ -729,9 +729,8 @@ class Monitor(threading.Thread):
 
 def idle_preflight() -> dict[str, Any]:
     containers = run(["docker", "ps", "--format", "{{.ID}} {{.Names}}"], check=False).stdout.splitlines()
-    unrelated = [line for line in containers if "shopping-bench" not in line]
-    if unrelated:
-        raise RuntimeError("unrelated Docker containers are running: " + ", ".join(unrelated))
+    if containers:
+        raise RuntimeError("Docker containers are running: " + ", ".join(containers))
     def cpu() -> list[int]:
         return [int(value) for value in Path("/proc/stat").read_text().splitlines()[0].split()[1:]]
     before = cpu()

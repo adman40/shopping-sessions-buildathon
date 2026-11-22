@@ -92,7 +92,7 @@ V2_SHA=0000000000000000000000000000000000000000
   --command="/srv/shopping-bench/bin/shopping-bench --root /srv/shopping-bench campaign --sha $V2_SHA --seed 1 --events 100000 --clicks 25000"
 ```
 
-The idle preflight refuses unrelated running containers, samples `/proc/stat`, and requires at least 90% idle CPU, at most 1% steal, and a one-minute load average no greater than 2.0.
+After exact-label-scoped recovery, the idle preflight refuses every remaining running container, samples `/proc/stat`, and requires at least 90% idle CPU, at most 1% steal, and a one-minute load average no greater than 2.0.
 Run on an otherwise idle VM and do not start package updates or another benchmark while it is active.
 The kernel lock at `/srv/shopping-bench/locks/run.lock` is authoritative; its file contents are informational.
 

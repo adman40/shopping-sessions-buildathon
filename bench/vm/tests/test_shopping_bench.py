@@ -82,6 +82,12 @@ class ValidationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 bench.validate_dataset_provenance(changed, **arguments)
 
+    def test_idle_preflight_rejects_similarly_named_unmanaged_container(self):
+        running = mock.Mock(stdout="deadbeef shopping-bench-cache\n")
+        with mock.patch.object(bench, "run", return_value=running):
+            with self.assertRaisesRegex(RuntimeError, "shopping-bench-cache"):
+                bench.idle_preflight()
+
     def test_host_validation_requires_exact_vm_identity_and_capacity(self):
         facts = {
             **bench.EXPECTED_HOST,
