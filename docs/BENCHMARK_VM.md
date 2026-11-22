@@ -19,7 +19,7 @@ The result records Docker exit and OOM state, cgroup-v2 memory/CPU/I/O counters,
 A V2 timing is eligible only when fixtures pass, the trusted oracle succeeds, candidate rows exactly match the oracle, telemetry has the frozen successful reconciled format, cgroup memory is observed below 22 GiB, sampled output plus scratch stays below 45 GiB, and measured runtime stays below the fixed 180-second limit.
 The exact candidate telemetry bytes are copied into the run bundle, checksummed, and embedded as parsed data in `result.json`.
 
-The current implementation has two explicit scorer-parity gaps.
+The current implementation has three explicit scorer-parity gaps.
 The combined output/scratch disk allowance is monitored at 45 GiB but is not a hard filesystem cap, so results say `monitor-only-no-hard-cap`.
 The candidate run is warm with unspecified official cache state, so it is not a cold-cache scorer-equivalent campaign.
 The dedicated VM uses persistent disk rather than known scorer-local scratch.
@@ -123,7 +123,7 @@ A dry run lists cleanup actions without changing state.
 /srv/shopping-bench/bin/shopping-bench --root /srv/shopping-bench cleanup
 ```
 
-The runner removes only stopped containers labeled `org.shopping-bench.managed=true` and its own partial dataset directories.
+Recovery removes all containers labeled `org.shopping-bench.managed=true`; cleanup removes only stopped labeled containers and the runner's partial dataset directories.
 Certified datasets, checkouts, images, completed results, output, and logs are retained until explicitly removed.
 
 ## Download and stop
