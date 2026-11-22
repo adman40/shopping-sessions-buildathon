@@ -13,7 +13,7 @@ SPEC = importlib.util.spec_from_file_location("shopping_bench", MODULE_PATH)
 bench = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
 SPEC.loader.exec_module(bench)
-SHA = "8a35b964aed48ecba5e44d061606b2a4bb9a2239"
+SHA = "e1c9cc89ffaa51a4047372b1c3d39ceea4068fc0"
 
 
 def hold_lock(path: str, ready: multiprocessing.Event, release: multiprocessing.Event) -> None:
@@ -51,15 +51,27 @@ class ValidationTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 bench.validate_checkout_provenance(SHA, head, dirty, origin)
 
+    def test_manifest_rejects_unlisted_dataset_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            data.mkdir()
+            (data / "listed.csv").write_text("listed\n")
+            manifest = root / "DATA_SHA256SUMS"
+            bench.write_manifest(data, manifest)
+            (data / "extra.csv").write_text("extra\n")
+            with self.assertRaisesRegex(RuntimeError, "extra.csv"):
+                bench.verify_manifest(data, manifest)
+
     def test_dataset_provenance_requires_every_immutable_identifier(self):
         generation = {
-            "schema_version": 1, "generator_sha": SHA,
+            "schema_version": 1, "generator_sha": bench.BASELINE_SHA,
             "generator_binary_sha256": "1" * 64,
             "dataset_manifest_sha256": "2" * 64,
             "seed": 1, "events": 100_000, "clicks": 25_000, "threads": 8,
         }
         arguments = dict(
-            generator_sha=SHA, binary_sha="1" * 64, manifest_sha="2" * 64,
+            generator_sha=bench.BASELINE_SHA, binary_sha="1" * 64, manifest_sha="2" * 64,
             seed=1, events=100_000, clicks=25_000,
         )
         bench.validate_dataset_provenance(generation, **arguments)
@@ -69,6 +81,25 @@ class ValidationTests(unittest.TestCase):
             changed[field] = "wrong"
             with self.assertRaises(RuntimeError):
                 bench.validate_dataset_provenance(changed, **arguments)
+
+    def test_host_validation_requires_exact_vm_identity_and_capacity(self):
+        facts = {
+            **bench.EXPECTED_HOST,
+            "mem_total_bytes": 31 * 1024**3,
+            "cgroup_version": 2,
+        }
+        bench.validate_host_facts(facts)
+        for field, invalid in (
+            ("machine_type", "n2-standard-4"),
+            ("architecture", "aarch64"),
+            ("cpu_model", "different CPU"),
+            ("vcpus", 4),
+            ("mem_total_bytes", 16 * 1024**3),
+        ):
+            changed = dict(facts)
+            changed[field] = invalid
+            with self.assertRaisesRegex(RuntimeError, field):
+                bench.validate_host_facts(changed)
 
 
 class LockTests(unittest.TestCase):
@@ -93,12 +124,16 @@ class LockTests(unittest.TestCase):
 class ResultTests(unittest.TestCase):
     def result(self):
         return {
-            "schema_version": bench.SCHEMA_VERSION, "run_id": "test-run", "candidate_mode": "v2",
-            "result_status": "eligible-v2-candidate", "operator_label": None,
+            "schema_version": bench.SCHEMA_VERSION, "run_id": "test-run",
+            "result_status": "eligible-v2-candidate",
             "outcome": "pass", "eligible_timing": True,
             "provenance": {"git_sha": SHA, "image_id": "sha256:" + "1" * 64,
+                           "baseline_sha": bench.BASELINE_SHA, "baseline_tree": "a" * 40,
+                           "fixtures_tree": "b" * 40,
+                           "oracle_image_id": "sha256:" + "5" * 64,
                            "generator_binary_sha256": "2" * 64,
                            "dataset_manifest_sha256": "3" * 64,
+                           "oracle_output_manifest_sha256": "6" * 64,
                            "seed": 1, "events": 100_000, "clicks": 25_000},
             "timing": {"class": "warm", "wall_ns": 123},
             "container": {"exit_code": 0, "oom_killed": False},
@@ -121,36 +156,20 @@ class ResultTests(unittest.TestCase):
                 rows = list(csv.DictReader(handle))
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["git_sha"], SHA)
-            self.assertEqual(rows[0]["candidate_mode"], "v2")
+            self.assertEqual(rows[0]["baseline_sha"], bench.BASELINE_SHA)
             self.assertEqual(rows[0]["result_status"], "eligible-v2-candidate")
             self.assertEqual(rows[0]["candidate_telemetry_sha256"], "4" * 64)
             self.assertEqual(rows[0]["wall_ns"], "123")
             self.assertFalse(list((root / "run").glob("*.tmp.*")))
 
-    def test_result_finalization_upgrades_legacy_v1_index_without_losing_rows(self):
+    def test_result_finalization_rejects_non_v2_index_schema(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             index = root / "results.csv"
-            legacy = {field: "" for field in bench.LEGACY_CSV_FIELDS}
-            legacy.update({
-                "schema_version": "1", "run_id": "legacy", "measurement_label": "old smoke",
-                "outcome": "pass", "eligible_timing": "true", "git_sha": SHA,
-                "seed": "1", "events": "100000", "clicks": "25000",
-                "self_check": "true",
-            })
-            with index.open("w", newline="") as handle:
-                writer = csv.DictWriter(handle, fieldnames=bench.LEGACY_CSV_FIELDS)
-                writer.writeheader()
-                writer.writerow(legacy)
-            bench.finalize_result(root / "run", index, self.result())
-            with index.open(newline="") as handle:
-                rows = list(csv.DictReader(handle))
-            self.assertEqual(len(rows), 2)
-            self.assertEqual(rows[0]["run_id"], "legacy")
-            self.assertEqual(rows[0]["candidate_mode"], "v1-smoke")
-            self.assertEqual(rows[0]["result_status"], "passing-v1-smoke-only")
-            self.assertEqual(rows[0]["operator_label"], "old smoke")
-            self.assertEqual(rows[1]["candidate_mode"], "v2")
+            index.write_text("schema_version,run_id,measurement_label\n")
+            with self.assertRaisesRegex(RuntimeError, "unsupported results CSV fields"):
+                bench.finalize_result(root / "run", index, self.result())
+            self.assertFalse((root / "run/result.json").exists())
 
 
 class TelemetryTests(unittest.TestCase):
@@ -188,7 +207,7 @@ class TelemetryTests(unittest.TestCase):
             payload = (json.dumps(self.telemetry(), sort_keys=True) + "\n").encode()
             (scratch / "v2-telemetry.json").write_bytes(payload)
             value, artifact = bench.ingest_candidate_telemetry(
-                scratch, run_dir, "v2", 100_000, 25_000
+                scratch, run_dir, 100_000, 25_000
             )
             self.assertEqual(value["outcome"], "success")
             self.assertTrue(artifact["required"])
@@ -206,26 +225,57 @@ class TelemetryTests(unittest.TestCase):
             telemetry["outcome"] = "failure"
             (scratch / "v2-telemetry.json").write_text(json.dumps(telemetry))
             _, artifact = bench.ingest_candidate_telemetry(
-                scratch, run_dir, "v2", 100_000, 25_000
+                scratch, run_dir, 100_000, 25_000
             )
             self.assertFalse(artifact["valid"])
             self.assertIn("outcome must be success", artifact["validation_error"])
             self.assertTrue((run_dir / artifact["path"]).is_file())
 
             _, missing = bench.ingest_candidate_telemetry(
-                root / "empty", root / "second-run", "v2", 100_000, 25_000
+                root / "empty", root / "second-run", 100_000, 25_000
             )
             self.assertFalse(missing["valid"])
             self.assertFalse(missing["present"])
 
-    def test_v1_smoke_does_not_require_candidate_telemetry(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            _, artifact = bench.ingest_candidate_telemetry(
-                root / "scratch", root / "run", "v1-smoke", 100_000, 25_000
+class QualificationTests(unittest.TestCase):
+    @staticmethod
+    def passing_inputs():
+        return {
+            "timed_out": False,
+            "wall_ns": bench.TIMEOUT_NS - 1,
+            "exit_code": 0,
+            "oom_killed": False,
+            "oom_event": False,
+            "memory_peak_bytes": bench.MEMORY_QUALIFY_BYTES - 1,
+            "combined_peak_allocated_bytes": bench.DISK_STOP_BYTES - 1,
+            "disk_threshold_exceeded": False,
+            "fixtures_ok": True,
+            "exact_oracle_match": True,
+            "telemetry_valid": True,
+        }
+
+    def test_eligibility_requires_exact_oracle_match(self):
+        values = self.passing_inputs()
+        self.assertEqual(bench.qualification_outcome(**values), (True, "pass"))
+        values["exact_oracle_match"] = False
+        self.assertEqual(
+            bench.qualification_outcome(**values),
+            (False, "correctness_fail"),
+        )
+
+    def test_eligibility_enforces_fixed_time_and_resource_thresholds(self):
+        for field, value, outcome in (
+            ("wall_ns", bench.TIMEOUT_NS, "timeout"),
+            ("memory_peak_bytes", None, "resource_fail"),
+            ("memory_peak_bytes", bench.MEMORY_QUALIFY_BYTES, "resource_fail"),
+            ("combined_peak_allocated_bytes", bench.DISK_STOP_BYTES, "resource_fail"),
+        ):
+            values = self.passing_inputs()
+            values[field] = value
+            self.assertEqual(
+                bench.qualification_outcome(**values),
+                (False, outcome),
             )
-            self.assertFalse(artifact["required"])
-            self.assertTrue(artifact["valid"])
 
 
 class ProgressiveGateTests(unittest.TestCase):
@@ -234,10 +284,10 @@ class ProgressiveGateTests(unittest.TestCase):
             root = Path(temporary)
             (root / "results").mkdir()
             with self.assertRaises(RuntimeError):
-                bench.ensure_progressive_gate(root, SHA, 1, 1_000_000, "v2")
+                bench.ensure_progressive_gate(root, SHA, 1, 1_000_000)
             result = ResultTests().result()
             bench.finalize_result(root / "run", root / "results/results.csv", result)
-            bench.ensure_progressive_gate(root, SHA, 1, 1_000_000, "v2")
+            bench.ensure_progressive_gate(root, SHA, 1, 1_000_000)
 
 
 class CommandTests(unittest.TestCase):
@@ -247,7 +297,7 @@ class CommandTests(unittest.TestCase):
             (root / "fixtures").mkdir()
             for index in range(35):
                 (root / "fixtures" / f"case-{index}").mkdir()
-            result = bench.fixture_gates(root, "candidate", "checker", root / "work", "v2")
+            result = bench.fixture_gates(root, "candidate", "checker", root / "work")
             self.assertFalse(result["ok"])
             self.assertEqual(result["total"], 35)
             self.assertIn("expected exactly 36 fixtures", result["failures"][0]["error"])
@@ -266,7 +316,6 @@ class CommandTests(unittest.TestCase):
                         "Id": "sha256:" + "5" * 64,
                         "Config": {"Labels": {
                             "org.opencontainers.image.revision": SHA,
-                            "org.shopping-bench.mode": "v2",
                             "org.shopping-bench.role": "candidate",
                         }},
                     }]
@@ -274,7 +323,9 @@ class CommandTests(unittest.TestCase):
                 return mock.Mock(stdout="")
 
             with mock.patch.object(bench, "run", side_effect=fake_run):
-                image_id, metadata = bench.build_image(source, SHA, "v2")
+                image_id, metadata = bench.build_image(
+                    source, SHA, "v2/Dockerfile", "candidate"
+                )
             build = calls[0]
             self.assertEqual(build[build.index("--file") + 1], str(source / "v2/Dockerfile"))
             self.assertEqual(build[-1], str(source))
@@ -287,9 +338,10 @@ class CommandTests(unittest.TestCase):
             root = Path(temporary)
             args = bench.parse_args(["--root", str(root), "plan", "--sha", SHA,
                                      "--events", "100000", "--clicks", "25000"])
-            command = bench.command_for_container("sha256:" + "0" * 64, "name",
-                                                  root / "data", root / "out", root / "scratch",
-                                                  args.mode)
+            command = bench.command_for_container(
+                "sha256:" + "0" * 64, "name", root / "data", root / "out",
+                root / "scratch", telemetry_required=True
+            )
             joined = " ".join(command)
             for required in ("--platform linux/amd64", "--network none", "--read-only",
                              "/tmp:rw,size=64m,mode=1777", "--cap-drop ALL",
@@ -299,18 +351,70 @@ class CommandTests(unittest.TestCase):
                              "V2_TELEMETRY_PATH=/scratch/v2-telemetry.json"):
                 self.assertIn(required, joined)
             self.assertEqual(args.sha, SHA)
-            self.assertEqual(args.mode, "v2")
-            self.assertEqual(bench.candidate_config(args.mode)["dockerfile"], "v2/Dockerfile")
 
-    def test_v1_smoke_remains_available_without_v2_telemetry_contract(self):
+    def test_campaign_rejects_removed_modes_and_gate_overrides(self):
+        common = ["campaign", "--sha", SHA, "--events", "100000", "--clicks", "25000"]
+        for removed in (
+            ["--mode", "v1-smoke"],
+            ["--idle-seconds", "0"],
+            ["--timeout-seconds", "300"],
+            ["--label", "manual"],
+        ):
+            with self.assertRaises(SystemExit):
+                bench.parse_args(common + removed)
+
+    def test_campaign_sources_validation_workload_from_pinned_baseline(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            command = bench.command_for_container(
-                "sha256:" + "0" * 64, "name", root / "data", root / "out",
-                root / "scratch", "v1-smoke"
+            root = Path(temporary).resolve()
+            candidate_source = root / "candidate"
+            baseline_source = root / "baseline"
+            data = root / "dataset/data"
+            args = mock.Mock(
+                sha=SHA, events=100_000, clicks=25_000,
+                seed=1, root=str(root),
             )
-            self.assertNotIn("V2_TELEMETRY_PATH=/scratch/v2-telemetry.json", command)
-            self.assertEqual(bench.candidate_config("v1-smoke")["dockerfile"], "Dockerfile")
+            candidate_image = "sha256:" + "1" * 64
+            oracle_image = "sha256:" + "2" * 64
+            image_meta = {"inspect": {}, "dockerfile": "v2/Dockerfile"}
+            oracle_meta = {"inspect": {}, "dockerfile": "Dockerfile"}
+            result = {"run_id": "run", "outcome": "pass", "eligible_timing": True}
+            with (
+                mock.patch.object(bench, "recover"),
+                mock.patch.object(bench, "ensure_progressive_gate"),
+                mock.patch.object(bench, "host_facts", return_value={}),
+                mock.patch.object(
+                    bench, "source_checkout",
+                    side_effect=[(candidate_source, "candidate-tree"),
+                                 (baseline_source, "baseline-tree")],
+                ) as checkout,
+                mock.patch.object(
+                    bench, "checkout_tree", side_effect=["fixtures-tree", "generator-tree"]
+                ),
+                mock.patch.object(
+                    bench, "build_generator", return_value=(root / "generate", "binary-sha")
+                ) as generator,
+                mock.patch.object(
+                    bench, "prepare_dataset", return_value=(data, {"generator_sha": bench.BASELINE_SHA})
+                ) as dataset,
+                mock.patch.object(
+                    bench, "build_image",
+                    side_effect=[(candidate_image, image_meta), (oracle_image, oracle_meta)],
+                ),
+                mock.patch.object(
+                    bench, "fixture_gates",
+                    return_value={"passed": 36, "total": 36, "failures": [], "ok": True},
+                ) as fixtures,
+                mock.patch.object(bench, "timed_run", return_value=(result, root / "runs/run")),
+            ):
+                self.assertEqual(bench.campaign(args), 0)
+            self.assertEqual(
+                checkout.call_args_list,
+                [mock.call(root, SHA), mock.call(root, bench.BASELINE_SHA)],
+            )
+            generator.assert_called_once_with(root, baseline_source, bench.BASELINE_SHA)
+            self.assertEqual(dataset.call_args.args[2], bench.BASELINE_SHA)
+            self.assertEqual(fixtures.call_args.args[0], baseline_source)
+            self.assertEqual(fixtures.call_args.args[2], oracle_image)
 
 
 if __name__ == "__main__":

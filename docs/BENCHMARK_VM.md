@@ -6,19 +6,21 @@ The runner accepts only a public full 40-character commit SHA and keeps benchmar
 
 ## Scope and parity
 
-In the default `v2` mode, the runner builds the candidate from `v2/Dockerfile` and builds the root V1 image only as an untimed output checker because the minimal V2 runtime has no Python or Polars.
-The optional `v1-smoke` mode keeps the prior root-Dockerfile smoke path.
-The runner builds images and the generator outside the timer, verifies all 36 fixtures, checks the generated dataset checksum, proves the VM is idle, creates the stopped container, and times from immediately before `docker start -a` through observed exit using the host monotonic clock.
+The runner builds the V2 candidate from its requested commit and `v2/Dockerfile`.
+Generator source, all fixture inputs and expected outputs, and the V1 oracle/checker image are independently checked out from the immutable validated baseline `8a35b964aed48ecba5e44d061606b2a4bb9a2239`.
+The runner builds images and the baseline generator outside the timer, verifies all 36 baseline fixtures, checks the complete generated-dataset manifest, and runs the baseline V1 image untimed on that exact dataset to authorize the expected output.
+It then proves the VM is idle, creates the stopped candidate container, and times from immediately before `docker start -a` through observed exit using the host monotonic clock.
 The candidate container is verified after creation to use linux/amd64, 8 CPUs, 24 GiB memory with equal memory/swap, no network, a read-only root, a 64 MiB `/tmp`, uid/gid 1000, 4096 PIDs, dropped capabilities, no-new-privileges, and the exact `/data`, `/output`, `/scratch`, and environment contract.
-V2 additionally receives `V2_TELEMETRY_PATH=/scratch/v2-telemetry.json`.
+The candidate receives `V2_TELEMETRY_PATH=/scratch/v2-telemetry.json`.
 A single nonblocking `flock` serializes recovery, fixture checks, and measurement.
-The result records Docker exit and OOM state, cgroup-v2 memory/CPU/I/O counters when available, output and scratch sampled high-water marks, output self-checks, source/generator/candidate-image/checker-image/dataset/host provenance, the exact container-create command, and unavailable-counter labels.
-A V2 timing is eligible only when its candidate telemetry has the frozen successful, reconciled format.
+Before any candidate can qualify, the runner verifies GCP metadata for the exact project, zone, instance, and `n2-standard-8` machine type, plus x86-64 architecture, CPU model, eight vCPUs, expected physical-memory range, and cgroup v2.
+The result records Docker exit and OOM state, cgroup-v2 memory/CPU/I/O counters, output and scratch sampled high-water marks, exact semantic comparison against the untimed oracle output, candidate and baseline Git trees, baseline fixture and generator trees, source/generator/candidate-image/oracle-image/dataset/host provenance, and the exact container-create command.
+A V2 timing is eligible only when fixtures pass, the trusted oracle succeeds, candidate rows exactly match the oracle, telemetry has the frozen successful reconciled format, cgroup memory is observed below 22 GiB, sampled output plus scratch stays below 45 GiB, and measured runtime stays below the fixed 180-second limit.
 The exact candidate telemetry bytes are copied into the run bundle, checksummed, and embedded as parsed data in `result.json`.
 
 The current implementation has two explicit scorer-parity gaps.
 The combined output/scratch disk allowance is monitored at 45 GiB but is not a hard filesystem cap, so results say `monitor-only-no-hard-cap`.
-The smoke run is warm with unspecified official cache state, so it is not a cold-cache scorer-equivalent campaign.
+The candidate run is warm with unspecified official cache state, so it is not a cold-cache scorer-equivalent campaign.
 The dedicated VM uses persistent disk rather than known scorer-local scratch.
 
 ## Local tests and dry run
@@ -29,7 +31,7 @@ Run these before copying the harness to the VM:
 make bench-vm-test
 # Replace the all-zero value with the public full V2 commit SHA.
 make bench-vm-plan \
-  BENCH_MODE=v2 BENCH_SHA=0000000000000000000000000000000000000000 \
+  BENCH_SHA=0000000000000000000000000000000000000000 \
   BENCH_EVENTS=100000 BENCH_CLICKS=25000
 ```
 
@@ -77,37 +79,34 @@ Output checking runs with the image's Polars installation.
 
 ## Run a V2 100K candidate measurement
 
-Use an immutable public commit that contains an integrated, correctness-qualified V2 candidate.
-The command builds the V2 candidate and untimed checker outside measurement, generates seed 1 with 100,000 events and 25,000 clicks, verifies the dataset manifest, runs all fixtures, and only then attempts the measured run.
-It stops without escalating if fixtures, idle/resource checks, container verification, exit/OOM checks, output self-checks, or V2 telemetry validation fail.
+Use an immutable public commit that contains an integrated V2 candidate.
+The command builds that candidate while obtaining the generator, fixtures, expected outputs, and V1 oracle image only from the pinned baseline.
+It generates seed 1 with 100,000 events and 25,000 clicks, verifies the dataset manifest has neither missing nor extra files, runs all baseline fixtures, produces an untimed trusted-oracle output on the same generated input, and only then attempts the measured run.
+It stops without escalating if host provenance, fixtures, oracle generation, idle/resource checks, container verification, exit/OOM checks, exact oracle comparison, or V2 telemetry validation fail.
 
 ```bash
 # Replace the all-zero value with the public full V2 commit SHA.
 V2_SHA=0000000000000000000000000000000000000000
 "$GCLOUD" --configuration=buildathon compute ssh "amanoni@$VM" \
   --project="$PROJECT" --zone="$ZONE" --ssh-flag='-o BatchMode=yes' \
-  --command="/srv/shopping-bench/bin/shopping-bench --root /srv/shopping-bench campaign --mode v2 --sha $V2_SHA --seed 1 --events 100000 --clicks 25000"
+  --command="/srv/shopping-bench/bin/shopping-bench --root /srv/shopping-bench campaign --sha $V2_SHA --seed 1 --events 100000 --clicks 25000"
 ```
-
-For a compatibility-only V1 smoke, pass `--mode v1-smoke` with the published V1 SHA `8a35b964aed48ecba5e44d061606b2a4bb9a2239`.
-A passing V1 result is classified as `passing-v1-smoke-only`, never as a V2 candidate.
 
 The idle preflight refuses unrelated running containers, samples `/proc/stat`, and requires at least 90% idle CPU, at most 1% steal, and a one-minute load average no greater than 2.0.
 Run on an otherwise idle VM and do not start package updates or another benchmark while it is active.
 The kernel lock at `/srv/shopping-bench/locks/run.lock` is authoritative; its file contents are informational.
 
-Every attempt that reaches measurement writes `runs/<run-id>/result.json`, a one-row `result.csv`, stdout/stderr, immutable image-inspect and dataset-provenance artifacts, and an append-only row in `results/results.csv`.
-V2 runs also retain `candidate-telemetry.json` with its checksum and validation metadata in the authoritative schema-version-2 JSON.
-When a schema-version-2 result is first appended, the runner upgrades a legacy V1 results index in place while preserving its rows and classifying them as `v1-smoke`.
-`candidate_mode` and `result_status` distinguish an eligible V2 candidate, a V1 smoke-only pass, and an ineligible result without claiming an official score.
+Every attempt that reaches measurement writes `runs/<run-id>/result.json`, a one-row `result.csv`, candidate and oracle stdout/stderr, retained oracle output and manifest, immutable image-inspect and dataset-provenance artifacts, and an append-only row in `results/results.csv`.
+Runs retain `candidate-telemetry.json` with its checksum and validation metadata in the authoritative schema-version-2 JSON.
+The results index accepts only the current V2 schema; legacy V1 CSV migration is intentionally unsupported.
+`result_status` distinguishes an eligible V2 candidate from an ineligible result without claiming an official score.
 Failed fixture gates are stored under `results/fixtures-*.json` and suppress measurement.
 
 ## Progressive size gates
 
 Allowed event tiers are 100K, 1M, 5M, 15M, 30M, and 60M, with clicks fixed at one quarter of events.
-Advance one tier at a time only after correctness and resource review of the prior tier.
-Stop immediately on fixture or self-check failure, nonzero exit, timeout, OOM, missing required telemetry, sampled combined disk above 45 GiB, memory at or above 22 GiB, or a projection above the 180-second limit.
-Treat 20 GiB memory as a warning and preserve at least 15-30 seconds of runtime margin.
+Tier advancement has no human approval step: the next tier is enabled only by a prior result whose machine-verifiable correctness, exact-oracle, telemetry, resource, timing, baseline-provenance, and host-provenance gates all made it `eligible-v2-candidate`.
+The runner automatically refuses advancement after fixture or exact-oracle failure, nonzero exit, timeout, OOM, missing required telemetry or cgroup memory, sampled combined disk at or above 45 GiB, memory at or above 22 GiB, or a linear next-tier projection at or above the fixed 180-second limit.
 Use seeds 1, 2, and 3 only for an eventual 60M release campaign.
 Do not describe any run as V2 until an integrated V2 image passes its own full correctness gates.
 
@@ -124,7 +123,7 @@ A dry run lists cleanup actions without changing state.
 ```
 
 The runner removes only stopped containers labeled `org.shopping-bench.managed=true` and its own partial dataset directories.
-Certified datasets, checkouts, images, completed results, output, and logs are retained until the operator reviews them.
+Certified datasets, checkouts, images, completed results, output, and logs are retained until explicitly removed.
 
 ## Download and stop
 
@@ -143,7 +142,7 @@ mkdir -p benchmark-results/<run-id>
   --project="$PROJECT" --zone="$ZONE" --scp-flag='-oBatchMode=yes'
 ```
 
-Verify the local JSON contains the expected full source SHA and tree, generator SHA and binary checksum, candidate and checker image IDs and inspect checksums, Dockerfile checksum, dataset manifest checksum, exact scorer-equivalent create command, fixture count, self-check, V2 telemetry checksum and validation result, mode/result status, and parity labels before using the timing.
+The machine eligibility decision verifies the full candidate SHA and tree, pinned baseline SHA and tree, fixture and generator trees, generator binary checksum, candidate and oracle image IDs and inspect checksums, Dockerfile checksums, complete dataset and oracle-output manifest checksums, exact scorer-equivalent create command, fixture count, exact oracle match, V2 telemetry checksum and validation result, result status, host identity, and resource thresholds.
 
 Confirm no benchmark container is running before stopping the VM:
 

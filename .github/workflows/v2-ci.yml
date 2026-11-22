@@ -67,3 +67,8 @@ jobs:
         if: steps.workspace.outputs.present == 'true'
         shell: bash
         run: python3 -m unittest discover -s v2/tests -p 'test_*.py'
+
+      - name: Run VM benchmark harness tests
+        if: steps.workspace.outputs.present == 'true'
+        shell: bash
+        run: make bench-vm-test

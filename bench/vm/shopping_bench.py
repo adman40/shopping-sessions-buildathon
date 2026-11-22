@@ -23,30 +23,38 @@ import sys
 import threading
 import time
 from typing import Any
+import urllib.error
+import urllib.request
 
 SCHEMA_VERSION = 2
 REPO_URL = "https://github.com/adman40/shopping-sessions-buildathon.git"
+BASELINE_SHA = "8a35b964aed48ecba5e44d061606b2a4bb9a2239"
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 TIERS = (100_000, 1_000_000, 5_000_000, 15_000_000, 30_000_000, 60_000_000)
 MEMORY_BYTES = 24 * 1024**3
+MEMORY_QUALIFY_BYTES = 22 * 1024**3
 TMPFS_BYTES = 64 * 1024**2
 DISK_STOP_BYTES = 45 * 1024**3
+IDLE_SECONDS = 5.0
+TIMEOUT_SECONDS = 180.0
+TIMEOUT_NS = int(TIMEOUT_SECONDS * 1_000_000_000)
 EXPECTED_FIXTURES = 36
-CANDIDATE_MODES = ("v2", "v1-smoke")
+EXPECTED_CPU_MODEL = "Intel(R) Xeon(R) CPU @ 2.80GHz"
+EXPECTED_HOST = {
+    "instance": "benchmark-x86",
+    "project": "buildathon-benchmarks-515401",
+    "zone": "us-central1-a",
+    "machine_type": "n2-standard-8",
+    "architecture": "x86_64",
+    "cpu_model": EXPECTED_CPU_MODEL,
+    "vcpus": 8,
+}
 PHASES = ("discovery", "links", "events", "clicks", "sort", "sweep", "write")
-LEGACY_CSV_FIELDS = (
-    "schema_version", "run_id", "measurement_label", "outcome", "eligible_timing",
-    "git_sha", "image_id", "generator_binary_sha256", "dataset_manifest_sha256",
-    "seed", "events", "clicks", "cache_class", "wall_ns", "exit_code", "oom_killed",
-    "memory_peak_bytes", "cpu_usage_usec", "cpu_utilization_percent_of_8",
-    "io_read_bytes", "io_write_bytes", "output_peak_allocated_bytes",
-    "scratch_peak_allocated_bytes", "combined_peak_allocated_bytes",
-    "fixtures_passed", "fixtures_total", "self_check", "disk_cap_parity",
-)
 CSV_FIELDS = (
-    "schema_version", "run_id", "candidate_mode", "result_status", "operator_label",
-    "outcome", "eligible_timing", "git_sha", "image_id", "generator_binary_sha256",
-    "dataset_manifest_sha256", "candidate_telemetry_sha256",
+    "schema_version", "run_id", "result_status", "outcome", "eligible_timing",
+    "git_sha", "image_id", "baseline_sha", "baseline_tree", "fixtures_tree",
+    "oracle_image_id", "generator_binary_sha256", "dataset_manifest_sha256",
+    "oracle_output_manifest_sha256", "candidate_telemetry_sha256",
     "seed", "events", "clicks", "cache_class", "wall_ns", "exit_code", "oom_killed",
     "memory_peak_bytes", "cpu_usage_usec", "cpu_utilization_percent_of_8",
     "io_read_bytes", "io_write_bytes", "output_peak_allocated_bytes",
@@ -78,14 +86,6 @@ def artifact_metadata(path: Path, relative_to: Path) -> dict[str, Any]:
     }
 
 
-def candidate_config(mode: str) -> dict[str, Any]:
-    if mode == "v2":
-        return {"mode": mode, "dockerfile": "v2/Dockerfile", "telemetry_required": True}
-    if mode == "v1-smoke":
-        return {"mode": mode, "dockerfile": "Dockerfile", "telemetry_required": False}
-    raise ValueError(f"--mode must be one of {', '.join(CANDIDATE_MODES)}")
-
-
 def validate_sha(value: str) -> str:
     if not SHA_RE.fullmatch(value):
         raise ValueError("--sha must be a lower-case, full 40-character commit SHA")
@@ -100,9 +100,8 @@ def validate_scale(events: int, clicks: int) -> None:
 
 
 def command_for_container(image: str, name: str, data: Path, output: Path,
-                          scratch: Path, mode: str) -> list[str]:
+                          scratch: Path, *, telemetry_required: bool) -> list[str]:
     """Return the single authoritative scorer-equivalent create command."""
-    config = candidate_config(mode)
     command = [
         "docker", "create", "--name", name,
         "--label", "org.shopping-bench.managed=true",
@@ -119,7 +118,7 @@ def command_for_container(image: str, name: str, data: Path, output: Path,
         "--env", "SCRATCH_DIR=/scratch", "--env", "HOME=/scratch",
         "--env", "NCPU=8", "--env", "MEM_GB=24",
     ]
-    if config["telemetry_required"]:
+    if telemetry_required:
         command += ["--env", "V2_TELEMETRY_PATH=/scratch/v2-telemetry.json"]
     command.append(image)
     return command
@@ -181,12 +180,15 @@ def flatten_result(result: dict[str, Any]) -> dict[str, Any]:
     container = result["container"]
     return {
         "schema_version": result["schema_version"], "run_id": result["run_id"],
-        "candidate_mode": result["candidate_mode"], "result_status": result["result_status"],
-        "operator_label": result.get("operator_label") or "", "outcome": result["outcome"],
+        "result_status": result["result_status"], "outcome": result["outcome"],
         "eligible_timing": str(result["eligible_timing"]).lower(),
         "git_sha": provenance["git_sha"], "image_id": provenance["image_id"],
+        "baseline_sha": provenance["baseline_sha"], "baseline_tree": provenance["baseline_tree"],
+        "fixtures_tree": provenance["fixtures_tree"],
+        "oracle_image_id": provenance["oracle_image_id"],
         "generator_binary_sha256": provenance["generator_binary_sha256"],
         "dataset_manifest_sha256": provenance["dataset_manifest_sha256"],
+        "oracle_output_manifest_sha256": provenance["oracle_output_manifest_sha256"],
         "candidate_telemetry_sha256": result["telemetry"]["artifact"].get("sha256", ""),
         "seed": provenance["seed"], "events": provenance["events"], "clicks": provenance["clicks"],
         "cache_class": timing["class"], "wall_ns": timing["wall_ns"],
@@ -204,44 +206,21 @@ def flatten_result(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def upgrade_results_csv(results_csv: Path) -> None:
+def validate_results_csv(results_csv: Path) -> None:
     if not results_csv.exists():
         return
     with results_csv.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        fields = tuple(reader.fieldnames or ())
-        rows = list(reader)
-    if fields == CSV_FIELDS:
-        return
-    if fields != LEGACY_CSV_FIELDS:
+        fields = tuple(csv.DictReader(handle).fieldnames or ())
+    if fields != CSV_FIELDS:
         raise RuntimeError(f"unsupported results CSV fields: {fields}")
-    upgraded = []
-    for legacy in rows:
-        row = {field: legacy.get(field, "") for field in CSV_FIELDS}
-        row.update({
-            "candidate_mode": "v1-smoke",
-            "result_status": ("passing-v1-smoke-only"
-                              if legacy.get("eligible_timing") == "true" else "ineligible"),
-            "operator_label": legacy.get("measurement_label", ""),
-            "candidate_telemetry_sha256": "",
-        })
-        upgraded.append(row)
-    temporary = results_csv.with_name(f".{results_csv.name}.upgrade.{os.getpid()}")
-    with temporary.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
-        writer.writeheader()
-        writer.writerows(upgraded)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(temporary, results_csv)
 
 
 def finalize_result(run_dir: Path, results_csv: Path, result: dict[str, Any]) -> None:
     """Atomically finalize authoritative JSON, then append its CSV projection."""
+    validate_results_csv(results_csv)
     atomic_json(run_dir / "result.json", result)
     row = flatten_result(result)
     results_csv.parent.mkdir(parents=True, exist_ok=True)
-    upgrade_results_csv(results_csv)
     new_file = not results_csv.exists()
     with results_csv.open("a", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
@@ -293,6 +272,16 @@ def source_checkout(root: Path, sha: str) -> tuple[Path, str]:
     return source, tree
 
 
+def checkout_tree(source: Path, path: str) -> str:
+    return run(["git", "-C", str(source), "rev-parse", f"HEAD:{path}"]).stdout.strip()
+
+
+def verify_live_checkout(source: Path, sha: str) -> None:
+    head = run(["git", "-C", str(source), "rev-parse", "HEAD"]).stdout.strip()
+    dirty = run(["git", "-C", str(source), "status", "--porcelain"]).stdout
+    validate_checkout_provenance(sha, head, dirty)
+
+
 def build_generator(root: Path, source: Path, sha: str) -> tuple[Path, str]:
     target = root / "generators" / sha
     binary = target / "release" / "generate"
@@ -307,7 +296,11 @@ def build_generator(root: Path, source: Path, sha: str) -> tuple[Path, str]:
 
 def write_manifest(data: Path, manifest: Path) -> str:
     lines = []
-    for path in sorted(item for item in data.rglob("*") if item.is_file()):
+    entries = sorted(data.rglob("*"))
+    symlinks = [path.relative_to(data).as_posix() for path in entries if path.is_symlink()]
+    if symlinks:
+        raise RuntimeError(f"dataset contains symbolic links: {symlinks}")
+    for path in (item for item in entries if item.is_file()):
         relative = path.relative_to(data).as_posix()
         lines.append(f"{sha256_file(path)}  {path.stat().st_size}  {relative}\n")
     if not lines:
@@ -320,14 +313,32 @@ def verify_manifest(data: Path, manifest: Path) -> str:
     lines = manifest.read_text(encoding="utf-8").splitlines()
     if not lines:
         raise RuntimeError("dataset manifest is empty")
+    listed: set[str] = set()
     for line in lines:
         digest, size, relative = line.split("  ", 2)
         relative_path = Path(relative)
         if relative_path.is_absolute() or ".." in relative_path.parts:
             raise RuntimeError(f"dataset manifest has an unsafe path: {relative}")
+        normalized = relative_path.as_posix()
+        if normalized in listed:
+            raise RuntimeError(f"dataset manifest repeats a path: {relative}")
+        listed.add(normalized)
         path = data / relative_path
         if not path.is_file() or path.stat().st_size != int(size) or sha256_file(path) != digest:
             raise RuntimeError(f"dataset checksum mismatch: {relative}")
+    entries = list(data.rglob("*"))
+    symlinks = [path.relative_to(data).as_posix() for path in entries if path.is_symlink()]
+    if symlinks:
+        raise RuntimeError(f"dataset contains symbolic links: {symlinks}")
+    actual = {
+        path.relative_to(data).as_posix()
+        for path in entries
+        if path.is_file()
+    }
+    if listed != actual:
+        missing = sorted(listed - actual)
+        extra = sorted(actual - listed)
+        raise RuntimeError(f"dataset manifest path mismatch: missing={missing}, extra={extra}")
     return sha256_file(manifest)
 
 
@@ -388,17 +399,14 @@ def prepare_dataset(root: Path, binary: Path, generator_sha: str, binary_sha: st
     return data, generation
 
 
-def build_image(source: Path, sha: str, mode: str, *, checker: bool = False) -> tuple[str, dict[str, Any]]:
-    config = candidate_config("v1-smoke" if checker else mode)
-    dockerfile_relative = config["dockerfile"]
+def build_image(source: Path, sha: str, dockerfile_relative: str,
+                role: str) -> tuple[str, dict[str, Any]]:
     dockerfile = source / dockerfile_relative
-    role = "checker" if checker else "candidate"
-    tag = f"shopping-bench-{mode}-{role}:{sha}"
+    tag = f"shopping-bench-{role}:{sha}"
     run(["docker", "build", "--pull", "--platform", "linux/amd64",
          "--label", "org.shopping-bench.managed=true",
          "--label", f"org.opencontainers.image.revision={sha}",
          "--label", f"org.shopping-bench.commit={sha}",
-         "--label", f"org.shopping-bench.mode={mode}",
          "--label", f"org.shopping-bench.role={role}", "--tag", tag,
          "--file", str(dockerfile), str(source)], timeout=3600)
     image = json.loads(run(["docker", "image", "inspect", tag]).stdout)[0]
@@ -408,8 +416,8 @@ def build_image(source: Path, sha: str, mode: str, *, checker: bool = False) -> 
         raise RuntimeError("Docker returned a non-content-addressed image ID")
     if labels.get("org.opencontainers.image.revision") != sha:
         raise RuntimeError("image revision label does not match source SHA")
-    if labels.get("org.shopping-bench.mode") != mode or labels.get("org.shopping-bench.role") != role:
-        raise RuntimeError("image mode or role label does not match the requested build")
+    if labels.get("org.shopping-bench.role") != role:
+        raise RuntimeError("image role label does not match the requested build")
     return image_id, {
         "dockerfile": dockerfile_relative,
         "dockerfile_sha256": sha256_file(dockerfile),
@@ -419,25 +427,27 @@ def build_image(source: Path, sha: str, mode: str, *, checker: bool = False) -> 
 
 
 def create_container(image: str, name: str, data: Path, output: Path, scratch: Path,
-                     mode: str) -> str:
+                     *, telemetry_required: bool) -> str:
     output.mkdir(parents=True, exist_ok=False)
     scratch.mkdir(parents=True, exist_ok=False)
     output.chmod(0o777)
     scratch.chmod(0o777)
-    container_id = run(command_for_container(image, name, data, output, scratch, mode)).stdout.strip()
-    verify_container(container_id, data, output, scratch, mode)
+    container_id = run(command_for_container(
+        image, name, data, output, scratch, telemetry_required=telemetry_required
+    )).stdout.strip()
+    verify_container(container_id, data, output, scratch,
+                     telemetry_required=telemetry_required)
     return container_id
 
 
 def verify_container(container_id: str, data: Path, output: Path, scratch: Path,
-                     mode: str) -> None:
-    config_for_mode = candidate_config(mode)
+                     *, telemetry_required: bool) -> None:
     info = json.loads(run(["docker", "inspect", container_id]).stdout)[0]
     host, config = info["HostConfig"], info["Config"]
     failures = []
     expected_env = {"DATA_DIR=/data", "OUTPUT_DIR=/output", "SCRATCH_DIR=/scratch",
                     "HOME=/scratch", "NCPU=8", "MEM_GB=24"}
-    if config_for_mode["telemetry_required"]:
+    if telemetry_required:
         expected_env.add("V2_TELEMETRY_PATH=/scratch/v2-telemetry.json")
     checks = {
         "network none": host.get("NetworkMode") == "none",
@@ -480,14 +490,16 @@ schemas = {
 }
 keys = {"user_daily": ["user_id", "day"], "campaign_daily": ["campaign_id", "day"]}
 summary = {"ok": True, "tables": {}}
+def parquet(folder, table):
+ if folder.is_symlink() or not folder.is_dir(): raise ValueError(f"missing real directory {table}")
+ visible = [p for p in folder.iterdir() if not p.name.startswith((".", "_"))]
+ if not visible or any(p.is_symlink() or not p.is_file() or p.suffix != ".parquet" for p in visible): raise ValueError(f"invalid visible files in {table}")
+ return pl.concat([pl.read_parquet(p) for p in sorted(visible)]), visible
+def rows(df, schema):
+ return sorted(df.select(schema.keys()).cast(schema).rows(), key=lambda r: tuple("" if v is None else str(v) for v in r))
 try:
  for table, schema in schemas.items():
-  folder = root / table
-  if folder.is_symlink() or not folder.is_dir(): raise ValueError(f"missing real directory {table}")
-  visible = [p for p in folder.iterdir() if not p.name.startswith((".", "_"))]
-  if not visible or any(p.is_symlink() or not p.is_file() or p.suffix != ".parquet" for p in visible): raise ValueError(f"invalid visible files in {table}")
-  frames = [pl.read_parquet(p) for p in sorted(visible)]
-  frame = pl.concat(frames)
+  frame, visible = parquet(root / table, table)
   if set(frame.columns) != set(schema): raise ValueError(f"wrong columns in {table}: {frame.columns}")
   for column, expected in schema.items():
    actual = frame.schema[column]
@@ -499,11 +511,14 @@ try:
   for column in [c for c in frame.columns if c in ("sessions", "events", "revenue_cents", "purchasing_sessions", "assisted_sessions")]:
    if frame.select((pl.col(column) < 0).any()).item(): raise ValueError(f"negative {table}.{column}")
   if expected_root:
-   exp = pl.read_csv(expected_root / f"{table}.csv", schema_overrides={k: (pl.String if v == pl.Date else v) for k,v in schema.items()})
-   if exp.height: exp = exp.with_columns(pl.col("day").str.to_date())
-   else: exp = pl.DataFrame(schema=schema)
-   def rows(df): return sorted(df.select(schema.keys()).cast(schema).rows(), key=lambda r: tuple("" if v is None else str(v) for v in r))
-   if rows(frame) != rows(exp): raise ValueError(f"row mismatch in {table}")
+   expected_folder = expected_root / table
+   if expected_folder.is_dir():
+    exp, _ = parquet(expected_folder, f"expected {table}")
+   else:
+    exp = pl.read_csv(expected_root / f"{table}.csv", schema_overrides={k: (pl.String if v == pl.Date else v) for k,v in schema.items()})
+    if exp.height: exp = exp.with_columns(pl.col("day").str.to_date())
+    else: exp = pl.DataFrame(schema=schema)
+   if rows(frame, schema) != rows(exp, schema): raise ValueError(f"row mismatch in {table}")
   digest = hashlib.sha256()
   for p in sorted(visible): digest.update(p.read_bytes())
   summary["tables"][table] = {"rows": frame.height, "files": len(visible), "parquet_sha256": digest.hexdigest()}
@@ -531,8 +546,8 @@ def check_output(image: str, output: Path, expected: Path | None = None) -> dict
     return value
 
 
-def fixture_gates(source: Path, image: str, checker_image: str, work: Path,
-                  mode: str) -> dict[str, Any]:
+def fixture_gates(source: Path, image: str, checker_image: str,
+                  work: Path) -> dict[str, Any]:
     fixtures = sorted(path for path in (source / "fixtures").iterdir() if path.is_dir())
     if len(fixtures) != EXPECTED_FIXTURES:
         return {
@@ -547,9 +562,14 @@ def fixture_gates(source: Path, image: str, checker_image: str, work: Path,
         data = fixture / ("data" if (fixture / "data").is_dir() else "input")
         container_id = ""
         try:
-            container_id = create_container(image, f"shopping-bench-fixture-{os.getpid()}-{case.lower()}",
-                                            data, run_path / "output", run_path / "scratch", mode)
-            completed = run(["docker", "start", "-a", container_id], check=False, timeout=180)
+            container_id = create_container(
+                image, f"shopping-bench-fixture-{os.getpid()}-{case.lower()}",
+                data, run_path / "output", run_path / "scratch", telemetry_required=True
+            )
+            completed = run(
+                ["docker", "start", "-a", container_id],
+                check=False, timeout=TIMEOUT_SECONDS,
+            )
             state = json.loads(run(["docker", "inspect", container_id]).stdout)[0]["State"]
             check = check_output(checker_image, run_path / "output", fixture / "expected")
             if completed.returncode == 0 and state["ExitCode"] == 0 and not state["OOMKilled"] and check["ok"]:
@@ -707,7 +727,7 @@ class Monitor(threading.Thread):
         }
 
 
-def idle_preflight(seconds: float) -> dict[str, Any]:
+def idle_preflight() -> dict[str, Any]:
     containers = run(["docker", "ps", "--format", "{{.ID}} {{.Names}}"], check=False).stdout.splitlines()
     unrelated = [line for line in containers if "shopping-bench" not in line]
     if unrelated:
@@ -715,7 +735,7 @@ def idle_preflight(seconds: float) -> dict[str, Any]:
     def cpu() -> list[int]:
         return [int(value) for value in Path("/proc/stat").read_text().splitlines()[0].split()[1:]]
     before = cpu()
-    time.sleep(seconds)
+    time.sleep(IDLE_SECONDS)
     after = cpu()
     deltas = [b - a for a, b in zip(before, after)]
     total = sum(deltas)
@@ -726,8 +746,36 @@ def idle_preflight(seconds: float) -> dict[str, Any]:
     load = os.getloadavg()
     if idle_ratio < 0.90 or steal_ratio > 0.01 or load[0] > 2.0:
         raise RuntimeError(f"VM is not idle enough: idle={idle_ratio:.3f} steal={steal_ratio:.3f} load1={load[0]:.2f}")
-    return {"sample_seconds": seconds, "idle_ratio": idle_ratio, "steal_ratio": steal_ratio,
+    return {"sample_seconds": IDLE_SECONDS, "idle_ratio": idle_ratio, "steal_ratio": steal_ratio,
             "loadavg": load, "running_containers": containers}
+
+
+def metadata_value(path: str) -> str:
+    request = urllib.request.Request(
+        f"http://metadata.google.internal/computeMetadata/v1/{path}",
+        headers={"Metadata-Flavor": "Google"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=2) as response:
+            if response.headers.get("Metadata-Flavor") != "Google":
+                raise RuntimeError("GCP metadata response lacks the Google flavor header")
+            return response.read().decode("utf-8").strip()
+    except (OSError, UnicodeDecodeError, urllib.error.URLError) as error:
+        raise RuntimeError(f"cannot verify GCP metadata path {path}: {error}") from error
+
+
+def validate_host_facts(facts: dict[str, Any]) -> None:
+    mismatches = [
+        key for key, expected in EXPECTED_HOST.items()
+        if facts.get(key) != expected
+    ]
+    memory = facts.get("mem_total_bytes")
+    if type(memory) is not int or not 29 * 1024**3 <= memory <= 33 * 1024**3:
+        mismatches.append("mem_total_bytes")
+    if facts.get("cgroup_version") != 2:
+        mismatches.append("cgroup_version")
+    if mismatches:
+        raise RuntimeError("benchmark host identity mismatch: " + ", ".join(mismatches))
 
 
 def host_facts() -> dict[str, Any]:
@@ -738,9 +786,12 @@ def host_facts() -> dict[str, Any]:
         if line.startswith("flags") and not flags: flags = line.split(":", 1)[1].strip()
     mem_total = next((int(line.split()[1]) * 1024 for line in Path("/proc/meminfo").read_text().splitlines()
                       if line.startswith("MemTotal:")), 0)
-    return {
-        "instance": "benchmark-x86", "project": "buildathon-benchmarks-515401", "zone": "us-central1-a",
-        "machine_type": "n2-standard-8", "kernel": run(["uname", "-r"]).stdout.strip(),
+    facts = {
+        "instance": metadata_value("instance/name"),
+        "project": metadata_value("project/project-id"),
+        "zone": metadata_value("instance/zone").rsplit("/", 1)[-1],
+        "machine_type": metadata_value("instance/machine-type").rsplit("/", 1)[-1],
+        "kernel": run(["uname", "-r"]).stdout.strip(),
         "architecture": run(["uname", "-m"]).stdout.strip(), "cpu_model": cpu_model,
         "cpu_flags_sha256": hashlib.sha256(flags.encode()).hexdigest(), "vcpus": os.cpu_count(),
         "mem_total_bytes": mem_total,
@@ -748,6 +799,8 @@ def host_facts() -> dict[str, Any]:
         "cgroup_version": 2 if Path("/sys/fs/cgroup/cgroup.controllers").exists() else 1,
         "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
     }
+    validate_host_facts(facts)
+    return facts
 
 
 def docker_timestamp_ns(value: str) -> int:
@@ -804,18 +857,16 @@ def validate_candidate_telemetry(value: Any, expected_events: int,
         raise RuntimeError("candidate telemetry resources must be non-negative integers")
 
 
-def ingest_candidate_telemetry(scratch: Path, run_dir: Path, mode: str,
+def ingest_candidate_telemetry(scratch: Path, run_dir: Path,
                                expected_events: int,
                                expected_clicks: int) -> tuple[Any, dict[str, Any]]:
-    required = candidate_config(mode)["telemetry_required"]
     source = scratch / "v2-telemetry.json"
     metadata: dict[str, Any] = {
-        "required": required, "present": False, "valid": not required,
+        "required": True, "present": False, "valid": False,
         "path": None, "sha256": "", "size_bytes": 0,
     }
     if not source.is_file() or source.is_symlink():
-        if required:
-            metadata["validation_error"] = "candidate emitted no regular telemetry file"
+        metadata["validation_error"] = "candidate emitted no regular telemetry file"
         return None, metadata
     raw = source.read_bytes()
     destination = run_dir / "candidate-telemetry.json"
@@ -827,8 +878,6 @@ def ingest_candidate_telemetry(scratch: Path, run_dir: Path, mode: str,
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         metadata["validation_error"] = f"candidate telemetry is not valid JSON: {error}"
         return None, metadata
-    if not required:
-        return value, metadata
     try:
         validate_candidate_telemetry(value, expected_events, expected_clicks)
     except RuntimeError as error:
@@ -838,62 +887,157 @@ def ingest_candidate_telemetry(scratch: Path, run_dir: Path, mode: str,
     return value, metadata
 
 
-def ensure_progressive_gate(root: Path, sha: str, seed: int, events: int,
-                            mode: str) -> None:
+def ensure_progressive_gate(root: Path, sha: str, seed: int, events: int) -> None:
     if events == TIERS[0]:
         return
     previous = TIERS[TIERS.index(events) - 1]
     index = root / "results" / "results.csv"
     if not index.exists():
-        raise RuntimeError(f"progressive gate requires a passing {previous}-event result first")
+        raise RuntimeError(f"progressive gate requires an eligible {previous}-event result first")
+    validate_results_csv(index)
     with index.open(newline="", encoding="utf-8") as handle:
-        rows = [row for row in csv.DictReader(handle)
-                if row["git_sha"] == sha and int(row["seed"]) == seed and
-                int(row["events"]) == previous and row["outcome"] == "pass" and
-                row["eligible_timing"] == "true" and row["self_check"] == "true" and
-                row.get("candidate_mode", "v1-smoke") == mode]
+        rows = [
+            row for row in csv.DictReader(handle)
+            if row["git_sha"] == sha
+            and row["baseline_sha"] == BASELINE_SHA
+            and int(row["seed"]) == seed
+            and int(row["events"]) == previous
+            and row["result_status"] == "eligible-v2-candidate"
+            and row["outcome"] == "pass"
+            and row["eligible_timing"] == "true"
+            and row["self_check"] == "true"
+        ]
     if not rows:
-        raise RuntimeError(f"progressive gate requires a passing {previous}-event result first")
+        raise RuntimeError(f"progressive gate requires an eligible {previous}-event result first")
     prior = rows[-1]
-    if int(prior["memory_peak_bytes"] or 0) >= 22 * 1024**3:
-        raise RuntimeError("progressive gate stopped: prior memory peak reached 22 GiB")
-    if int(prior["combined_peak_allocated_bytes"] or 0) >= DISK_STOP_BYTES:
+    memory = int(prior["memory_peak_bytes"] or 0)
+    disk = int(prior["combined_peak_allocated_bytes"] or 0)
+    if memory <= 0 or memory >= MEMORY_QUALIFY_BYTES:
+        raise RuntimeError("progressive gate stopped: prior memory did not pass 22 GiB threshold")
+    if disk >= DISK_STOP_BYTES:
         raise RuntimeError("progressive gate stopped: prior output/scratch reached 45 GiB")
     projected_ns = int(prior["wall_ns"]) * events / previous
-    if projected_ns >= 180_000_000_000:
+    if projected_ns >= TIMEOUT_NS:
         raise RuntimeError("progressive gate stopped: linear next-tier projection reaches 180 seconds")
 
 
-def timed_run(root: Path, source: Path, sha: str, tree: str, image_id: str,
-              image_meta: dict[str, Any], checker_image_id: str,
-              checker_image_meta: dict[str, Any], data: Path,
-              generation: dict[str, Any], fixtures: dict[str, Any], seed: int,
-              events: int, clicks: int, idle_seconds: float,
-              timeout_seconds: float, mode: str,
-              operator_label: str | None) -> tuple[dict[str, Any], Path]:
+def trusted_oracle_run(image_id: str, data: Path, run_dir: Path,
+                       run_id: str) -> tuple[Path, dict[str, Any]]:
+    output = run_dir / "oracle-output"
+    scratch = run_dir / "oracle-scratch"
+    stdout_path = run_dir / "oracle-stdout.log"
+    stderr_path = run_dir / "oracle-stderr.log"
+    manifest_path = run_dir / "ORACLE_SHA256SUMS"
+    name = f"shopping-bench-oracle-{run_id.lower()}"
+    container_id = create_container(
+        image_id, name, data, output, scratch, telemetry_required=False
+    )
+    create_command = command_for_container(
+        image_id, name, data, output, scratch, telemetry_required=False
+    )
+    timed_out = False
+    try:
+        with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+            process = subprocess.Popen(
+                ["docker", "start", "-a", container_id], stdout=stdout, stderr=stderr
+            )
+            try:
+                process.wait(timeout=TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                run(["docker", "kill", container_id], check=False)
+                process.wait(timeout=30)
+        state = json.loads(run(["docker", "inspect", container_id]).stdout)[0]["State"]
+        check = check_output(image_id, output)
+        if (timed_out or state["ExitCode"] != 0 or state["OOMKilled"]
+                or check.get("ok") is not True):
+            raise RuntimeError("trusted V1 oracle failed on the generated dataset")
+        manifest_sha = write_manifest(output, manifest_path)
+        return output, {
+            "source_sha": BASELINE_SHA,
+            "image_id": image_id,
+            "container_id": container_id,
+            "create_command": create_command,
+            "exit_code": state["ExitCode"],
+            "oom_killed": state["OOMKilled"],
+            "output_check": check,
+            "output_manifest_sha256": manifest_sha,
+            "artifacts": {
+                "stdout": artifact_metadata(stdout_path, run_dir),
+                "stderr": artifact_metadata(stderr_path, run_dir),
+                "output_manifest": artifact_metadata(manifest_path, run_dir),
+            },
+        }
+    finally:
+        remove_container(container_id)
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def qualification_outcome(*, timed_out: bool, wall_ns: int, exit_code: int,
+                          oom_killed: bool, oom_event: bool,
+                          memory_peak_bytes: int | None,
+                          combined_peak_allocated_bytes: int,
+                          disk_threshold_exceeded: bool, fixtures_ok: bool,
+                          exact_oracle_match: bool,
+                          telemetry_valid: bool) -> tuple[bool, str]:
+    resource_gate = (
+        memory_peak_bytes is not None
+        and memory_peak_bytes < MEMORY_QUALIFY_BYTES
+        and combined_peak_allocated_bytes < DISK_STOP_BYTES
+        and not disk_threshold_exceeded
+    )
+    time_gate = not timed_out and wall_ns < TIMEOUT_NS
+    success = (
+        time_gate and exit_code == 0 and not oom_killed and not oom_event
+        and resource_gate and fixtures_ok and exact_oracle_match and telemetry_valid
+    )
+    if not time_gate:
+        return False, "timeout"
+    if oom_killed or oom_event or not resource_gate:
+        return False, "resource_fail"
+    if exit_code != 0 or not exact_oracle_match:
+        return False, "correctness_fail"
+    if not telemetry_valid:
+        return False, "telemetry_fail"
+    return success, "pass"
+
+
+def timed_run(root: Path, candidate_source: Path, baseline_source: Path,
+              sha: str, tree: str, reference: dict[str, str], image_id: str,
+              image_meta: dict[str, Any], oracle_image_id: str,
+              oracle_image_meta: dict[str, Any], data: Path,
+              generation: dict[str, Any], fixtures: dict[str, Any], host: dict[str, Any],
+              seed: int, events: int, clicks: int) -> tuple[dict[str, Any], Path]:
     timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     run_id = f"{timestamp}-{sha[:12]}-s{seed}-e{events}-{image_id[7:19]}-r1"
     run_dir = root / "runs" / run_id
     run_dir.mkdir(parents=True)
     output, scratch = run_dir / "output", run_dir / "scratch"
     image_inspect_path = run_dir / "candidate-image-inspect.json"
-    checker_inspect_path = run_dir / "checker-image-inspect.json"
+    oracle_inspect_path = run_dir / "oracle-image-inspect.json"
     dataset_manifest_path = run_dir / "DATA_SHA256SUMS"
     generation_path = run_dir / "generation.json"
     atomic_json(image_inspect_path, image_meta["inspect"])
-    atomic_json(checker_inspect_path, checker_image_meta["inspect"])
+    atomic_json(oracle_inspect_path, oracle_image_meta["inspect"])
     atomic_json(generation_path, generation)
-    idle = idle_preflight(idle_seconds)
-    if run(["git", "-C", str(source), "rev-parse", "HEAD"]).stdout.strip() != sha or run(["git", "-C", str(source), "status", "--porcelain"]).stdout:
-        raise RuntimeError("source changed after build")
+    verify_live_checkout(candidate_source, sha)
+    verify_live_checkout(baseline_source, BASELINE_SHA)
     manifest = data.parent / "DATA_SHA256SUMS"
     manifest_sha = verify_manifest(data, manifest)
     atomic_bytes(dataset_manifest_path, manifest.read_bytes())
     if sha256_file(dataset_manifest_path) != manifest_sha:
         raise RuntimeError("dataset manifest changed while preparing run provenance")
+    oracle_output, oracle = trusted_oracle_run(
+        oracle_image_id, data, run_dir, run_id
+    )
+    idle = idle_preflight()
     name = f"shopping-bench-{run_id.lower()}"
-    container_id = create_container(image_id, name, data, output, scratch, mode)
-    create_command = command_for_container(image_id, name, data, output, scratch, mode)
+    container_id = create_container(
+        image_id, name, data, output, scratch, telemetry_required=True
+    )
+    create_command = command_for_container(
+        image_id, name, data, output, scratch, telemetry_required=True
+    )
     stdout_path, stderr_path = run_dir / "stdout.log", run_dir / "stderr.log"
     monitor = Monitor(container_id, output, scratch)
     timed_out = False
@@ -904,7 +1048,7 @@ def timed_run(root: Path, source: Path, sha: str, tree: str, image_id: str,
             process = subprocess.Popen(["docker", "start", "-a", container_id], stdout=stdout, stderr=stderr)
             monitor.start()
             try:
-                process.wait(timeout=timeout_seconds)
+                process.wait(timeout=TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 run(["docker", "kill", container_id], check=False)
@@ -912,71 +1056,82 @@ def timed_run(root: Path, source: Path, sha: str, tree: str, image_id: str,
             ended_ns = time.monotonic_ns()
         inspect = json.loads(run(["docker", "inspect", container_id]).stdout)[0]
         state = inspect["State"]
-        resources = monitor.finish(ended_ns - started_ns)
-        self_check = check_output(checker_image_id, output)
+        wall_ns = ended_ns - started_ns
+        resources = monitor.finish(wall_ns)
+        self_check = check_output(oracle_image_id, output, oracle_output)
         telemetry, telemetry_artifact = ingest_candidate_telemetry(
-            scratch, run_dir, mode, events, clicks
+            scratch, run_dir, events, clicks
         )
         oom_event = resources["memory_events"].get("oom_kill", 0) > 0
-        success = (not timed_out and state["ExitCode"] == 0 and not state["OOMKilled"] and not oom_event
-                   and not monitor.disk_threshold_exceeded and self_check.get("ok") is True
-                   and telemetry_artifact["valid"])
-        if timed_out: outcome = "timeout"
-        elif state["OOMKilled"] or oom_event or monitor.disk_threshold_exceeded: outcome = "resource_fail"
-        elif state["ExitCode"] != 0 or not self_check.get("ok"): outcome = "correctness_fail"
-        elif not telemetry_artifact["valid"]: outcome = "telemetry_fail"
-        else: outcome = "pass"
-        result_status = (
-            "eligible-v2-candidate" if success and mode == "v2"
-            else "passing-v1-smoke-only" if success
-            else "ineligible"
+        success, outcome = qualification_outcome(
+            timed_out=timed_out, wall_ns=wall_ns, exit_code=state["ExitCode"],
+            oom_killed=state["OOMKilled"], oom_event=oom_event,
+            memory_peak_bytes=resources["memory_peak_bytes"],
+            combined_peak_allocated_bytes=resources["combined_peak_allocated_bytes"],
+            disk_threshold_exceeded=monitor.disk_threshold_exceeded,
+            fixtures_ok=fixtures["ok"],
+            exact_oracle_match=self_check.get("ok") is True,
+            telemetry_valid=telemetry_artifact["valid"],
         )
         result = {
             "schema_version": SCHEMA_VERSION, "run_id": run_id,
-            "candidate_mode": mode, "result_status": result_status,
-            "operator_label": operator_label, "outcome": outcome,
-            "eligible_timing": success, "started_utc": started_utc,
+            "result_status": "eligible-v2-candidate" if success else "ineligible",
+            "outcome": outcome, "eligible_timing": success, "started_utc": started_utc,
             "provenance": {
                 "repository": REPO_URL, "git_sha": sha, "git_tree": tree, "git_tree_clean": True,
                 "image_id": image_id, "image_revision_label": sha,
                 "dockerfile": image_meta["dockerfile"],
                 "dockerfile_sha256": image_meta["dockerfile_sha256"],
-                "checker_image_id": checker_image_id,
-                "checker_dockerfile": checker_image_meta["dockerfile"],
-                "checker_dockerfile_sha256": checker_image_meta["dockerfile_sha256"],
+                "baseline_sha": BASELINE_SHA, "baseline_tree": reference["tree"],
+                "fixtures_tree": reference["fixtures_tree"],
+                "generator_tree": reference["generator_tree"],
+                "oracle_image_id": oracle_image_id,
+                "oracle_dockerfile": oracle_image_meta["dockerfile"],
+                "oracle_dockerfile_sha256": oracle_image_meta["dockerfile_sha256"],
+                "checker_program_sha256": hashlib.sha256(CHECKER.encode()).hexdigest(),
                 "generator_sha": generation["generator_sha"],
                 "generator_binary_sha256": generation["generator_binary_sha256"],
-                "dataset_manifest_sha256": manifest_sha, "seed": seed, "events": events, "clicks": clicks,
+                "dataset_manifest_sha256": manifest_sha,
+                "oracle_output_manifest_sha256": oracle["output_manifest_sha256"],
+                "seed": seed, "events": events, "clicks": clicks,
             },
-            "host": {**host_facts(), "idle_preflight": idle},
+            "host": {**host, "idle_preflight": idle},
             "limits": {"cpus": 8, "memory_bytes": MEMORY_BYTES, "swap_bytes": 0,
-                       "pids": 4096, "tmpfs_bytes": TMPFS_BYTES, "timeout_seconds": timeout_seconds},
+                       "qualification_memory_bytes": MEMORY_QUALIFY_BYTES,
+                       "pids": 4096, "tmpfs_bytes": TMPFS_BYTES,
+                       "timeout_seconds": TIMEOUT_SECONDS},
             "container": {
                 "id": container_id, "create_command": create_command,
                 "flags_sha256": hashlib.sha256("\0".join(create_command).encode()).hexdigest(),
                 "started_at": state["StartedAt"], "finished_at": state["FinishedAt"],
                 "exit_code": state["ExitCode"], "oom_killed": state["OOMKilled"],
             },
-            "timing": {"class": "warm", "repetition": 1, "wall_ns": ended_ns - started_ns,
+            "timing": {"class": "warm", "repetition": 1, "wall_ns": wall_ns,
                        "docker_state_wall_ns": docker_timestamp_ns(state["FinishedAt"]) - docker_timestamp_ns(state["StartedAt"]),
                        "clock": "CLOCK_MONOTONIC", "boundary": "docker-start-request-to-observed-exit"},
             "resources": resources,
-            "correctness": {"fixtures_passed": fixtures["passed"], "fixtures_total": fixtures["total"],
-                            "fixture_gate": fixtures["ok"], "self_check": self_check.get("ok") is True,
-                            "self_check_details": self_check,
-                            "telemetry_gate": telemetry_artifact["valid"]},
+            "correctness": {
+                "fixtures_passed": fixtures["passed"], "fixtures_total": fixtures["total"],
+                "fixture_gate": fixtures["ok"],
+                "trusted_oracle_gate": oracle["output_check"].get("ok") is True,
+                "exact_oracle_match": self_check.get("ok") is True,
+                "self_check": self_check.get("ok") is True,
+                "self_check_details": self_check,
+                "telemetry_gate": telemetry_artifact["valid"],
+            },
             "telemetry": {"candidate": telemetry, "artifact": telemetry_artifact},
+            "trusted_oracle": oracle,
             "parity": {
                 "container_constraints": "official-equivalent-verified",
                 "combined_disk_cap": "monitor-only-no-hard-cap",
                 "cache_state": "warm-unspecified-official-cache",
-                "counter_note": "null values mean the cgroup-v2 counter was unavailable",
+                "counter_note": "null values make a result ineligible",
             },
             "artifacts": {
                 "stdout": artifact_metadata(stdout_path, run_dir),
                 "stderr": artifact_metadata(stderr_path, run_dir),
                 "candidate_image_inspect": artifact_metadata(image_inspect_path, run_dir),
-                "checker_image_inspect": artifact_metadata(checker_inspect_path, run_dir),
+                "oracle_image_inspect": artifact_metadata(oracle_inspect_path, run_dir),
                 "dataset_manifest": artifact_metadata(dataset_manifest_path, run_dir),
                 "dataset_generation": artifact_metadata(generation_path, run_dir),
             },
@@ -992,35 +1147,47 @@ def timed_run(root: Path, source: Path, sha: str, tree: str, image_id: str,
 def campaign(args: argparse.Namespace) -> int:
     sha = validate_sha(args.sha)
     validate_scale(args.events, args.clicks)
-    candidate_config(args.mode)
     root = Path(args.root).resolve()
     ensure_layout(root)
     with BenchLock(root / "locks" / "run.lock"):
         recover(root)
-        ensure_progressive_gate(root, sha, args.seed, args.events, args.mode)
-        source, tree = source_checkout(root, sha)
-        binary, binary_sha = build_generator(root, source, sha)
-        data, generation = prepare_dataset(root, binary, sha, binary_sha, args.seed, args.events, args.clicks)
-        image_id, image_meta = build_image(source, sha, args.mode)
-        if args.mode == "v2":
-            checker_image_id, checker_image_meta = build_image(source, sha, args.mode, checker=True)
-        else:
-            checker_image_id, checker_image_meta = image_id, image_meta
+        ensure_progressive_gate(root, sha, args.seed, args.events)
+        host = host_facts()
+        candidate_source, tree = source_checkout(root, sha)
+        baseline_source, baseline_tree = source_checkout(root, BASELINE_SHA)
+        reference = {
+            "tree": baseline_tree,
+            "fixtures_tree": checkout_tree(baseline_source, "fixtures"),
+            "generator_tree": checkout_tree(baseline_source, "generator"),
+        }
+        binary, binary_sha = build_generator(root, baseline_source, BASELINE_SHA)
+        data, generation = prepare_dataset(
+            root, binary, BASELINE_SHA, binary_sha,
+            args.seed, args.events, args.clicks
+        )
+        image_id, image_meta = build_image(
+            candidate_source, sha, "v2/Dockerfile", "candidate"
+        )
+        oracle_image_id, oracle_image_meta = build_image(
+            baseline_source, BASELINE_SHA, "Dockerfile", "oracle"
+        )
         fixture_result = fixture_gates(
-            source, image_id, checker_image_id, root / "tmp", args.mode
+            baseline_source, image_id, oracle_image_id, root / "tmp"
         )
         fixture_result.update({
-            "candidate_mode": args.mode, "candidate_image_id": image_id,
-            "checker_image_id": checker_image_id,
+            "candidate_image_id": image_id,
+            "baseline_sha": BASELINE_SHA,
+            "baseline_tree": baseline_tree,
+            "fixtures_tree": reference["fixtures_tree"],
+            "oracle_image_id": oracle_image_id,
         })
         atomic_json(root / "results" / f"fixtures-{sha}-{image_id[7:19]}.json", fixture_result)
         if not fixture_result["ok"]:
             raise RuntimeError(f"fixture gate failed after {fixture_result['passed']}/{fixture_result['total']}; stop")
         result, run_dir = timed_run(
-            root, source, sha, tree, image_id, image_meta, checker_image_id,
-            checker_image_meta, data, generation, fixture_result, args.seed,
-            args.events, args.clicks, args.idle_seconds, args.timeout_seconds,
-            args.mode, args.label,
+            root, candidate_source, baseline_source, sha, tree, reference,
+            image_id, image_meta, oracle_image_id, oracle_image_meta, data,
+            generation, fixture_result, host, args.seed, args.events, args.clicks,
         )
         print(json.dumps({"run_id": result["run_id"], "outcome": result["outcome"],
                           "eligible_timing": result["eligible_timing"], "result": str(run_dir / "result.json")},
@@ -1057,17 +1224,22 @@ def cleanup(root: Path, dry_run: bool) -> list[str]:
 def plan(args: argparse.Namespace) -> int:
     validate_sha(args.sha)
     validate_scale(args.events, args.clicks)
-    config = candidate_config(args.mode)
     root = Path(args.root).resolve()
-    data = root / "datasets" / f"g{args.sha}-s{args.seed}-e{args.events}-c{args.clicks}" / "data"
-    command = command_for_container(f"sha256:{'0' * 64}", "shopping-bench-dry-run", data,
-                                    root / "runs" / "dry-run" / "output",
-                                    root / "runs" / "dry-run" / "scratch", args.mode)
-    print(json.dumps({"schema_version": SCHEMA_VERSION, "dry_run": True, "source_sha": args.sha,
-                      "generator_sha": args.sha, "candidate_mode": args.mode,
-                      "dockerfile": config["dockerfile"], "events": args.events,
-                      "clicks": args.clicks, "container_create": command,
-                      "timed_boundary": "docker start -a"}, indent=2))
+    data = root / "datasets" / f"g{BASELINE_SHA}-s{args.seed}-e{args.events}-c{args.clicks}" / "data"
+    command = command_for_container(
+        f"sha256:{'0' * 64}", "shopping-bench-dry-run", data,
+        root / "runs" / "dry-run" / "output",
+        root / "runs" / "dry-run" / "scratch", telemetry_required=True
+    )
+    print(json.dumps({
+        "schema_version": SCHEMA_VERSION, "dry_run": True, "source_sha": args.sha,
+        "baseline_sha": BASELINE_SHA, "generator_sha": BASELINE_SHA,
+        "fixtures_sha": BASELINE_SHA, "oracle_sha": BASELINE_SHA,
+        "dockerfile": "v2/Dockerfile", "events": args.events,
+        "clicks": args.clicks, "idle_seconds": IDLE_SECONDS,
+        "timeout_seconds": TIMEOUT_SECONDS, "container_create": command,
+        "timed_boundary": "docker start -a",
+    }, indent=2))
     return 0
 
 
@@ -1078,14 +1250,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     for name in ("plan", "campaign"):
         item = sub.add_parser(name)
         item.add_argument("--sha", required=True)
-        item.add_argument("--mode", choices=CANDIDATE_MODES, default="v2")
         item.add_argument("--seed", type=int, default=1)
         item.add_argument("--events", type=int, required=True)
         item.add_argument("--clicks", type=int, required=True)
-        if name == "campaign":
-            item.add_argument("--idle-seconds", type=float, default=5.0)
-            item.add_argument("--timeout-seconds", type=float, default=180.0)
-            item.add_argument("--label", help="optional operator note; not a score classification")
     cleanup_parser = sub.add_parser("cleanup")
     cleanup_parser.add_argument("--dry-run", action="store_true")
     sub.add_parser("recover")
