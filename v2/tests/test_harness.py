@@ -102,6 +102,52 @@ printf '{}\\n' > "$scratch/v2-telemetry.json"
             self.assertEqual((scratch / "spill.bin").read_bytes(), b"spill")
             self.assertEqual((scratch / "telemetry.json").read_text(), "{}\n")
 
+    def test_docker_wrapper_accepts_in_place_telemetry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            output = root / "output"
+            scratch = root / "scratch"
+            fake_bin = root / "bin"
+            data.mkdir()
+            scratch.mkdir()
+            fake_bin.mkdir()
+            docker = fake_bin / "docker"
+            docker.write_text(
+                """#!/bin/sh
+set -eu
+scratch=
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-v" ]; then
+    shift
+    case "$1" in
+      *:/scratch:z) scratch=${1%:/scratch:z} ;;
+    esac
+  fi
+  shift
+done
+test -n "$scratch"
+printf '{}\\n' > "$scratch/v2-telemetry.json"
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            telemetry = scratch / "v2-telemetry.json"
+            environment = dict(
+                os.environ,
+                PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                SCRATCH_DIR=str(scratch),
+                V2_TELEMETRY_PATH=str(telemetry),
+            )
+            process = subprocess.run(
+                [str(ROOT / "v2" / "docker_run.sh"), str(data), str(output)],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(process.returncode, 0, process.stderr)
+            self.assertEqual(telemetry.read_text(), "{}\n")
+
     def test_telemetry_requires_successful_reconciled_counters(self):
         counters = {
             phase: {

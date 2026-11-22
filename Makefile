@@ -8,7 +8,7 @@ DEV   ?= dev
 FIXTURES ?= $(if $(wildcard fixtures),fixtures,../../fixtures)
 export IMAGE CPUS MEM PLATFORM
 
-.PHONY: build fixtures dev run-dev check-dev
+.PHONY: build fixtures dev run-dev check-dev bench-vm-test bench-vm-plan
 
 ## Build the image for the scorer's platform, linux/amd64 (emulated on Apple silicon)
 build:
@@ -60,3 +60,15 @@ v2-differential:
 ## Report timing only after every V2 correctness and telemetry gate passes
 v2-benchmark:
 	IMAGE=$(V2_IMAGE) python3 scripts/v2_benchmark.py --candidate '$(V2_CANDIDATE)' --fixtures $(FIXTURES) --dev-data $(V2_DEV) --dev-answer $(V2_ANSWER)
+
+## Run the dedicated VM harness unit and shell tests (no cloud or Docker access)
+bench-vm-test:
+	python3 -m unittest discover -s bench/vm/tests -p 'test_*.py' -v
+	bash bench/vm/tests/test_cli.sh
+
+## Print the exact VM command plan without performing any work
+BENCH_SHA ?= $(shell git rev-parse HEAD)
+BENCH_EVENTS ?= 100000
+BENCH_CLICKS ?= 25000
+bench-vm-plan:
+	python3 bench/vm/shopping_bench.py plan --sha $(BENCH_SHA) --events $(BENCH_EVENTS) --clicks $(BENCH_CLICKS)
