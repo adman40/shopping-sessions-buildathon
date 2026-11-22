@@ -465,6 +465,7 @@ def verify_container(container_id: str, data: Path, output: Path, scratch: Path,
     }
     mounts = {m["Destination"]: m for m in info.get("Mounts", [])}
     checks["mounts"] = (
+        set(mounts) == {"/data", "/output", "/scratch"} and
         mounts.get("/data", {}).get("Source") == str(data.resolve()) and not mounts["/data"]["RW"] and
         mounts.get("/output", {}).get("Source") == str(output.resolve()) and mounts["/output"]["RW"] and
         mounts.get("/scratch", {}).get("Source") == str(scratch.resolve()) and mounts["/scratch"]["RW"]
@@ -483,8 +484,9 @@ def remove_container(container_id: str) -> None:
 CHECKER = r'''
 import hashlib, json, pathlib, sys
 import polars as pl
-root = pathlib.Path("/checked")
-expected_root = pathlib.Path("/expected") if pathlib.Path("/expected").exists() else None
+root = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path("/checked")
+expected_path = pathlib.Path(sys.argv[2]) if len(sys.argv) > 2 else pathlib.Path("/expected")
+expected_root = expected_path if expected_path.exists() else None
 schemas = {
  "user_daily": {"user_id": pl.String, "day": pl.Date, "sessions": pl.Int128, "events": pl.Int128, "revenue_cents": pl.Int128, "top_category": pl.String},
  "campaign_daily": {"campaign_id": pl.String, "channel": pl.String, "day": pl.Date, "sessions": pl.Int128, "purchasing_sessions": pl.Int128, "revenue_cents": pl.Int128, "assisted_sessions": pl.Int128},
@@ -504,7 +506,7 @@ try:
   if set(frame.columns) != set(schema): raise ValueError(f"wrong columns in {table}: {frame.columns}")
   for column, expected in schema.items():
    actual = frame.schema[column]
-   if expected == pl.Int128 and actual.is_integer(): continue
+   if expected == pl.Int128 and actual.is_signed_integer(): continue
    if expected == pl.String and actual.base_type() in (pl.String, pl.Categorical, pl.Enum): continue
    if actual != expected: raise ValueError(f"wrong type {table}.{column}: {actual}")
   frame = frame.select(schema.keys()).cast(schema)

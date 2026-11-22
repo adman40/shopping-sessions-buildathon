@@ -3,7 +3,10 @@ import csv
 import importlib.util
 import json
 import multiprocessing
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -353,6 +356,47 @@ class ProgressiveGateTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def test_checker_rejects_unsigned_aggregate_columns(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            table = root / "user_daily"
+            modules = root / "modules"
+            table.mkdir()
+            modules.mkdir()
+            (table / "part-0.parquet").write_bytes(b"unsigned fixture")
+            (modules / "polars.py").write_text(
+                """class Type:
+ def __init__(self, name, signed=False): self.name, self.signed = name, signed
+ def is_signed_integer(self): return self.signed
+ def base_type(self): return self
+ def __repr__(self): return self.name
+String = Type('String')
+Date = Type('Date')
+Int128 = Type('Int128', True)
+UInt64 = Type('UInt64')
+Categorical = Type('Categorical')
+Enum = Type('Enum')
+class Frame:
+ columns = ['user_id', 'day', 'sessions', 'events', 'revenue_cents', 'top_category']
+ schema = {'user_id': String, 'day': Date, 'sessions': UInt64, 'events': Int128, 'revenue_cents': Int128, 'top_category': String}
+def read_parquet(path): return Frame()
+def concat(frames): return frames[0]
+""",
+                encoding="utf-8",
+            )
+            environment = dict(
+                os.environ,
+                PYTHONPATH=f"{modules}{os.pathsep}{os.environ.get('PYTHONPATH', '')}",
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", bench.CHECKER, str(root)],
+                env=environment, capture_output=True, text=True,
+            )
+            result = json.loads(completed.stdout)
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertFalse(result["ok"])
+            self.assertIn("wrong type user_daily.sessions", result["error"])
+
     def test_fixture_gate_requires_exact_published_count_before_running(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -394,6 +438,47 @@ class CommandTests(unittest.TestCase):
             self.assertIn(f"org.opencontainers.image.revision={SHA}", build)
             self.assertEqual(image_id, "sha256:" + "5" * 64)
             self.assertEqual(metadata["dockerfile"], "v2/Dockerfile")
+
+    def test_container_verification_rejects_additional_mounts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data, output, scratch = root / "data", root / "output", root / "scratch"
+            info = {
+                "HostConfig": {
+                    "NetworkMode": "none", "ReadonlyRootfs": True,
+                    "Memory": bench.MEMORY_BYTES, "MemorySwap": bench.MEMORY_BYTES,
+                    "PidsLimit": 4096, "CapDrop": ["ALL"],
+                    "SecurityOpt": ["no-new-privileges"], "Tmpfs": {"/tmp": "rw"},
+                    "NanoCpus": 8_000_000_000,
+                },
+                "Config": {
+                    "User": "1000:1000",
+                    "Env": [
+                        "DATA_DIR=/data", "OUTPUT_DIR=/output", "SCRATCH_DIR=/scratch",
+                        "HOME=/scratch", "NCPU=8", "MEM_GB=24",
+                        "V2_TELEMETRY_PATH=/scratch/v2-telemetry.json",
+                    ],
+                },
+                "Mounts": [
+                    {"Destination": "/data", "Source": str(data.resolve()), "RW": False},
+                    {"Destination": "/output", "Source": str(output.resolve()), "RW": True},
+                    {"Destination": "/scratch", "Source": str(scratch.resolve()), "RW": True},
+                ],
+            }
+            with mock.patch.object(
+                bench, "run",
+                side_effect=lambda *_args, **_kwargs: mock.Mock(stdout=json.dumps([info])),
+            ):
+                bench.verify_container(
+                    "container", data, output, scratch, telemetry_required=True
+                )
+                info["Mounts"].append({
+                    "Destination": "/cache", "Source": "/var/lib/docker/cache", "RW": True,
+                })
+                with self.assertRaisesRegex(RuntimeError, "mounts"):
+                    bench.verify_container(
+                        "container", data, output, scratch, telemetry_required=True
+                    )
 
     def test_dry_run_constructs_exact_v2_constraints(self):
         with tempfile.TemporaryDirectory() as temporary:

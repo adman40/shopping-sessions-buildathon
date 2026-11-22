@@ -23,7 +23,8 @@ release() {
       -v "$OUT":/output:z -v "$SCRATCH":/scratch:z --entrypoint chmod "$IMAGE" \
       -R a+rwX /output /scratch >/dev/null 2>&1 || true
   fi
-  if [ -n "${V2_TELEMETRY_PATH:-}" ] && [ -f "$SCRATCH/v2-telemetry.json" ]; then
+  if [ -n "${V2_TELEMETRY_PATH:-}" ] && [ -f "$SCRATCH/v2-telemetry.json" ] && \
+      [ ! "$SCRATCH/v2-telemetry.json" -ef "$V2_TELEMETRY_PATH" ]; then
     cp "$SCRATCH/v2-telemetry.json" "$V2_TELEMETRY_PATH"
   fi
   if [ "$REMOVE_SCRATCH" -eq 1 ]; then
