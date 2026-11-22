@@ -42,7 +42,7 @@ v2/
 
 ### Boundary contracts
 
-- **Parser -> identity/reduce:** parsed rows preserve exact byte spans and parse status. No trim, Unicode-digit acceptance, CRLF normalization, or validation-order shortcut is allowed.
+- **Parser -> identity/reduce:** parsed rows preserve exact byte spans and parse status. Event and click input may span multiple parser-owned arenas to stay within 32-bit span limits; each row is resolved only against its owning arena while reducers retain one global event-winner or click-dedup state across every segment. No trim, Unicode-digit acceptance, CRLF normalization, or validation-order shortcut is allowed.
 - **Identity -> reduce:** `Canonicalize` in `v2/crates/domain/src/compact.rs` owns the frozen canonicalization contract.
 - **Reduce -> sweep:** only validated, non-late winning events and valid deduplicated clicks become 16-byte compact records. Event and click records are sorted/grouped by `(person_code, timestamp)`.
 - **Sweep -> output:** deterministic `UserDailyRow` and `CampaignDailyRow` aggregates with the exact required nullability and date types. Workers own local aggregates; reduction has no order-dependent floating point behavior.

@@ -14,7 +14,7 @@ The scorer-facing repository-root Dockerfile runs the Rust application under `v2
 
 ## Run and test locally
 
-You need Docker with buildx, and Python 3.10+ with `polars` for the test scripts. Install it with `pip install polars`.
+You need Docker with buildx, and Python 3.10+ with the test-script dependencies. Install them with `python3 -m pip install -r requirements.txt`.
 
 Build the image and run all 36 fixtures:
 
@@ -38,10 +38,10 @@ If your laptop cannot spare 8 cores and 24 GB, run with lower limits using `make
 - **x86 Linux and Windows machines.** Build and run the amd64 image natively.
 - **Apple-silicon Macs.** Emulating amd64 is slow. For fast local loops, build a native image with `make build run-dev PLATFORM=linux/arm64`. The Dockerfile pins no platform, so it builds either way. Check the amd64 image before you submit.
 
-To iterate without Docker:
+To run the V1 differential oracle without Docker:
 
 ```sh
-pip install polars==2.1.0
+python3 -m pip install -r requirements.txt
 python3 scripts/run_fixtures.py fixtures -- python3 pipeline/pipeline.py
 ```
 
@@ -67,10 +67,10 @@ Scorers are Google Cloud n2 Intel Xeon machines, Cascade Lake or newer, with AVX
 
 ## Common pitfalls
 
-- **Polars' CSV reader differs from `rules.md`.** Its quoting and malformed-line handling may not match `rules.md`. Test against the fixtures before relying on it.
-- **Threads.** `pipeline.py` sets `POLARS_MAX_THREADS` from `NCPU` before importing Polars. Otherwise Polars sizes its thread pool from the host machine's cores, which inside Docker on a Mac can differ from your CPU limit.
-- **Memory.** The container has 24 GB and no swap. Eager DataFrames over 60M+ rows of strings fill that fast. Lazy queries and the streaming engine help, and `POLARS_TEMP_DIR` already points at `/scratch`.
-- **`\d` is not `[0-9]`.** In several regex engines, including Rust's used by Polars, `\d` matches any Unicode digit. The rules mean ASCII digits only.
+- **CSV semantics.** The V1 Polars oracle's quoting and malformed-line handling can differ from `rules.md`; keep V2 parser changes covered by fixtures and differential checks.
+- **V1 oracle threads.** `pipeline.py` sets `POLARS_MAX_THREADS` from `NCPU` before importing Polars. Otherwise Polars sizes its thread pool from the host machine's cores, which inside Docker on a Mac can differ from your CPU limit.
+- **Memory.** The container has 24 GB and no swap. Qualify representative 60M-event runs rather than extrapolating memory use from the 1M development set.
+- **`\d` is not `[0-9]`.** In several regex engines, `\d` matches Unicode digits. The rules mean ASCII digits only.
 - **Extra files in output folders.** `_SUCCESS` and other non-Parquet files in the output folders are ignored.
 
 ## Self-checks
@@ -81,7 +81,8 @@ Scorers are Google Cloud n2 Intel Xeon machines, Cascade Lake or newer, with AVX
 
 ## Files in this starter
 
-- `pipeline/pipeline.py` holds your pipeline code.
+- `v2/` holds the scorer-facing Rust workspace; see `v2/README.md`.
+- `pipeline/pipeline.py` remains the V1 differential oracle.
 - `Dockerfile` builds a `linux/amd64` image for the Intel Xeon scorers.
 - `fixtures/` holds the 36 edge cases, each an `input/` folder and the `expected/` tables.
 - `scripts/` runs your image the way the scorer does and diffs the output.

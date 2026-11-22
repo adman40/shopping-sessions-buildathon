@@ -26,3 +26,7 @@ Every future contract change requires a focused contract test and an entry here.
 ## Slice 6 - 2026-11-20
 
 - Physical schema and publication details are now frozen by the [Slice 6 output contract](V2_IMPLEMENTATION_PLAN.md#slice-6--parquet-output-and-publication-contract); required fields are physically required and only `user_daily.top_category` is optional.
+
+## Integrated reducers - 2026-11-22
+
+- The [parser-to-reducer boundary](V2_IMPLEMENTATION_PLAN.md#boundary-contracts) now permits arena-qualified segments while retaining one global event-winner or click-dedup state. Tiny-arena regressions in `v2/crates/reduce/src/event.rs` and `v2/crates/reduce/src/click.rs` cover cross-segment selection, and the event reducer's 60M projection guards against reintroducing a single-arena assumption.

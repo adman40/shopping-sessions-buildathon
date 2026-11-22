@@ -18,8 +18,9 @@ Workspace manifests were merged semantically and `v2/Cargo.lock` was regenerated
 | Slice 5 sweep | `5590e9ea25c1999648eb0c0ad3f9393898c20311` | `a843dd5219e1f6f9d5da17eb51c589843061f541` |
 | Slice 6 output | `df6647e4b5f2c7ef4e8b8faf09dfdc743cb8fe29` | `4c1e91ace43b61a97655c29fed80f22f14b53b8f` |
 | Application and validation wiring | `7ca5c727ab35cbda722eb8b3e4cd99960b3f0911` | same commit |
-| Multi-arena orchestration, telemetry, and physical schema completion | `716ad4dffc547c9a531a3cc00ca02eb3e11fae2f` | same commit |
+| Application orchestration, telemetry, and physical schema completion | `716ad4dffc547c9a531a3cc00ca02eb3e11fae2f` | same commit |
 | Harness observer optimization and equivalence tests | `afc6fce7b6965e8ac556b32f35561e39506f3b71` | same commit |
+| Segmented reducers and Docker packaging consolidation | `8926f8c9db33b49bee1a1f2a0e6a58815c105077` | same commit |
 
 ## Qualification caveats
 
@@ -30,5 +31,6 @@ Its `linux/amd64` release-image build also exceeded its 1,200-second dependency-
 The integrated candidate's exact scorer-facing root Dockerfile subsequently produced a `linux/amd64` release image in 114 seconds.
 That image passed all 36 fixtures, all 10 randomized differential seeds, exact practical 1M output, physical schema validation, deterministic repeat, timed-run correctness, and telemetry validation.
 Before the observer optimization, the integrated harness also refused timing publication at `0.5177%` overhead.
-After integrating `afc6fce7b6965e8ac556b32f35561e39506f3b71`, its equivalence tests passed and the exact root-image harness passed with `0.2776%` observer overhead, strictly below the unchanged `0.5000%` ceiling.
+After integrating `afc6fce7b6965e8ac556b32f35561e39506f3b71` at `425e66722fa975e85eb988e3c998ae775861baa5`, its equivalence tests passed and the exact root-image harness passed with `0.2776%` observer overhead, strictly below the unchanged `0.5000%` ceiling.
+That complete harness result predates the segmented-reducer and Docker packaging change at `8926f8c9db33b49bee1a1f2a0e6a58815c105077`; the later commit's focused reducer checks do not replace a complete scorer-equivalent qualification.
 The historical shadow timeout and both earlier overhead refusals remain disclosed rather than retrospectively represented as green results.

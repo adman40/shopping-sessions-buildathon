@@ -36,7 +36,7 @@ python3 scripts/v2_generate.py --seed 1 --events 1000000 --clicks 250000 --outpu
 Run randomized differentials against V1 after a candidate exists:
 
 ```sh
-python3 scripts/v2_differential.py --candidate 'v2/docker_run.sh' --seeds 10
+make v2-differential
 ```
 
 Build the scorer-facing repository-root Dockerfile and run the complete correctness-gated harness:
