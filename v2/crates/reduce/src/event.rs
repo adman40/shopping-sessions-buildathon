@@ -115,8 +115,9 @@ impl EventReduction {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Winner {
+struct Winner<'a> {
     row: RawEvent,
+    arena: &'a [u8],
     ingest_ms: i64,
 }
 
@@ -163,6 +164,38 @@ where
     )
 }
 
+/// Reduces parser segments while retaining one global event-ID winner state.
+///
+/// Every row's spans are resolved only against the arena paired with its segment.
+///
+/// # Errors
+///
+/// Returns the same failures as [`reduce_events`].
+pub fn reduce_event_segments<'a, T, I, P>(
+    segments: impl IntoIterator<Item = (&'a [u8], &'a [ParseOutcome<RawEvent>])>,
+    timestamps: &T,
+    identity: &I,
+    products: &P,
+    window: EventWindow,
+) -> Result<EventReduction, PipelineError>
+where
+    T: TimestampParser,
+    I: Canonicalize,
+    P: ProductCatalog,
+{
+    let rows = segments.into_iter().flat_map(|(arena, rows)| {
+        rows.iter().cloned().map(move |outcome| (outcome, arena))
+    });
+    reduce_located_events_with_hasher(
+        rows,
+        timestamps,
+        identity,
+        products,
+        window,
+        RandomState::new(),
+    )
+}
+
 fn reduce_events_with_hasher<T, I, P, S>(
     rows: impl IntoIterator<Item = ParseOutcome<RawEvent>>,
     arena: &[u8],
@@ -178,11 +211,35 @@ where
     P: ProductCatalog,
     S: BuildHasher,
 {
+    reduce_located_events_with_hasher(
+        rows.into_iter().map(|outcome| (outcome, arena)),
+        timestamps,
+        identity,
+        products,
+        window,
+        hasher,
+    )
+}
+
+fn reduce_located_events_with_hasher<'a, T, I, P, S>(
+    rows: impl IntoIterator<Item = (ParseOutcome<RawEvent>, &'a [u8])>,
+    timestamps: &T,
+    identity: &I,
+    products: &P,
+    window: EventWindow,
+    hasher: S,
+) -> Result<EventReduction, PipelineError>
+where
+    T: TimestampParser,
+    I: Canonicalize,
+    P: ProductCatalog,
+    S: BuildHasher,
+{
     let mut counters = EventCounters::default();
     let mut drop_reasons = HashMap::new();
-    let mut winners: HashMap<Box<[u8]>, Winner, S> = HashMap::with_hasher(hasher);
+    let mut winners: HashMap<Box<[u8]>, Winner<'a>, S> = HashMap::with_hasher(hasher);
 
-    for outcome in rows {
+    for (outcome, arena) in rows {
         counters.input_rows += 1;
         let row = match outcome {
             ParseOutcome::Rejected(status) => {
@@ -206,7 +263,11 @@ where
                 "parser supplied an invalid event ingest_ts",
             )
         })?;
-        let winner = Winner { row, ingest_ms };
+        let winner = Winner {
+            row,
+            arena,
+            ingest_ms,
+        };
 
         match winners.entry(event_id.into()) {
             Entry::Vacant(entry) => {
@@ -226,11 +287,11 @@ where
 
     // Consuming the map drops its owned event-ID keys and hash buckets before
     // compact records are sorted. Winner rows retain only parser-arena spans.
-    let winner_rows: Vec<Winner> = winners.into_values().collect();
+    let winner_rows: Vec<Winner<'a>> = winners.into_values().collect();
     let mut pending = Vec::with_capacity(winner_rows.len());
 
     for winner in winner_rows {
-        match validate_winner(winner, arena, timestamps, identity, products, window)? {
+        match validate_winner(winner, timestamps, identity, products, window)? {
             Ok(event) => pending.push(event),
             Err(reason) => {
                 counters.dropped_winners += 1;
@@ -271,8 +332,7 @@ where
 }
 
 fn validate_winner<T, I, P>(
-    winner: Winner,
-    arena: &[u8],
+    winner: Winner<'_>,
     timestamps: &T,
     identity: &I,
     products: &P,
@@ -284,6 +344,7 @@ where
     P: ProductCatalog,
 {
     let row = winner.row;
+    let arena = winner.arena;
     let user_id = resolve(row.user_id, arena, "user_id")?;
     if user_id.is_empty() {
         return Ok(Err(DropReason::EmptyUserId));
@@ -872,6 +933,73 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind, PipelineErrorKind::InputContract);
+    }
+
+    #[test]
+    fn segmented_arenas_share_winners_and_validate_only_the_global_winner() {
+        let mut first_arena = Arena::default();
+        let later =
+            first_arena.row(b"e1", b"u2", b"2000", b"2300", b"view", b"p1", b"");
+        let first_only =
+            first_arena.row(b"e2", b"U1", b"3000", b"3100", b"view", b"p1", b"");
+        let first_rows = [
+            ParseOutcome::Accepted(later),
+            ParseOutcome::Accepted(first_only),
+        ];
+
+        let mut second_arena = Arena::default();
+        let earliest_invalid =
+            second_arena.row(b"e1", b"u1", b"bad", b"2100", b"view", b"p1", b"");
+        let second_only =
+            second_arena.row(b"e3", b"u1", b"1000", b"1000", b"view", b"p1", b"");
+        let second_rows = [
+            ParseOutcome::Accepted(earliest_invalid),
+            ParseOutcome::Accepted(second_only),
+        ];
+
+        const TINY_ARENA_LIMIT: usize = 40;
+        assert!(first_arena.bytes.len() <= TINY_ARENA_LIMIT);
+        assert!(second_arena.bytes.len() <= TINY_ARENA_LIMIT);
+        assert!(first_arena.bytes.len() + second_arena.bytes.len() > TINY_ARENA_LIMIT);
+
+        let result = reduce_event_segments(
+            [
+                (first_arena.bytes.as_slice(), first_rows.as_slice()),
+                (second_arena.bytes.as_slice(), second_rows.as_slice()),
+            ],
+            &IntegerTimestamps,
+            &ExactIdentity,
+            &TestProducts,
+            window(),
+        )
+        .unwrap();
+
+        assert_eq!(result.counters.input_rows, 4);
+        assert_eq!(result.counters.duplicate_rows, 1);
+        assert_eq!(result.counters.winning_rows, 3);
+        assert_eq!(result.dropped_for(DropReason::InvalidTimestamp), 1);
+        assert_eq!(result.counters.output_rows, 2);
+        assert!(result.counters.reconciles());
+        assert_eq!(
+            result
+                .batch
+                .records
+                .iter()
+                .map(|record| (record.person, record.timestamp_ms))
+                .collect::<Vec<_>>(),
+            vec![(PersonCode(1), 3000), (PersonCode(2), 1000)]
+        );
+    }
+
+    #[test]
+    fn sixty_million_event_projection_requires_multiple_arenas() {
+        const REPRESENTATIVE_EVENTS: u64 = 60_000_000;
+        const REPRESENTATIVE_EVENT_BYTES: u64 = 72;
+        let projected_bytes = REPRESENTATIVE_EVENTS * REPRESENTATIVE_EVENT_BYTES;
+        let arena_capacity = u64::from(u32::MAX);
+
+        assert!(projected_bytes > arena_capacity);
+        assert_eq!(projected_bytes.div_ceil(arena_capacity), 2);
     }
 
     #[test]

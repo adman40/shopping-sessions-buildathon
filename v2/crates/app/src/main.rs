@@ -16,9 +16,9 @@ use shopping_sessions_parser::{
     ByteCatalog, ParsedBatch, ParsedTimestamp, discover_input, load_campaigns, load_manifest,
     load_products, parse_clicks, parse_events, parse_links, parse_timestamp,
 };
-use shopping_sessions_reduce::click::{CampaignCatalog, reduce_clicks};
+use shopping_sessions_reduce::click::{CampaignCatalog, reduce_click_segments};
 use shopping_sessions_reduce::event::{
-    EventWindow, ProductCatalog, ResolvedProduct, TimestampParser, reduce_events,
+    EventWindow, ProductCatalog, ResolvedProduct, TimestampParser, reduce_event_segments,
 };
 use shopping_sessions_sweep::{
     DimensionLookup, RecordOrderer, StablePersonTimeOrder, reduce_workers, sweep_ordered,
@@ -101,28 +101,29 @@ fn run() -> Result<(), PipelineError> {
     let click_batches = parse_clicks(&discovered.click_files)?;
     register_event_ids(&event_batches, &mut identities, &mut known_ids)?;
     register_click_ids(&click_batches, &mut identities, &mut known_ids)?;
-    let events = coalesce_events(&event_batches)?;
-    let clicks = coalesce_clicks(&click_batches)?;
     let identity = identities.finish()?;
     let person_names = build_person_names(&identity, &known_ids)?;
     let timestamps = ExactTimestamps;
     let event_window = EventWindow::new(manifest.window_start_ms, manifest.window_end_ms)?;
-    let event_reduction = reduce_events(
-        events.rows.iter().cloned(),
-        &events.arena,
+    let event_reduction = reduce_event_segments(
+        event_batches
+            .iter()
+            .map(|batch| (batch.arena(), batch.rows.as_slice())),
         &timestamps,
         &identity,
         &products,
         event_window,
     )?;
+    drop(event_batches);
     if !event_reduction.counters.reconciles() {
         return Err(invariant("event reducer counters do not reconcile").in_phase(Phase::Events));
     }
     {
         let counters = telemetry.counters_mut(Phase::Events)?;
-        counters.input_rows = events.input_rows;
+        counters.input_rows = event_reduction.counters.input_rows;
         counters.accepted_rows = event_reduction.counters.output_rows;
-        counters.dropped_rows = events
+        counters.dropped_rows = event_reduction
+            .counters
             .input_rows
             .saturating_sub(event_reduction.counters.output_rows);
         counters.output_rows = event_reduction.counters.output_rows;
@@ -132,21 +133,24 @@ fn run() -> Result<(), PipelineError> {
     sample_scratch(&mut scratch, Phase::Events)?;
 
     telemetry.start_phase(Phase::Clicks)?;
-    let click_reduction = reduce_clicks(
-        &clicks.rows,
-        &clicks.arena,
+    let click_reduction = reduce_click_segments(
+        click_batches
+            .iter()
+            .map(|batch| (batch.arena(), batch.rows.as_slice())),
         manifest.window_start_ms,
         manifest.window_end_ms,
         parse_timestamp_ms,
         &identity,
         &campaigns.catalog,
     )?;
+    drop(click_batches);
     let accepted_clicks = to_u64(click_reduction.batch.records().len());
+    let input_clicks = to_u64(click_reduction.statuses.len());
     {
         let counters = telemetry.counters_mut(Phase::Clicks)?;
-        counters.input_rows = clicks.input_rows;
+        counters.input_rows = input_clicks;
         counters.accepted_rows = accepted_clicks;
-        counters.dropped_rows = clicks.input_rows.saturating_sub(accepted_clicks);
+        counters.dropped_rows = input_clicks.saturating_sub(accepted_clicks);
         counters.output_rows = accepted_clicks;
         counters.bytes_read = paths_size(&discovered.click_files, Phase::Clicks)?;
     }
@@ -425,187 +429,6 @@ fn register_click_ids(
     Ok(())
 }
 
-struct Coalesced<T> {
-    arena: Vec<u8>,
-    rows: Vec<ParseOutcome<T>>,
-    input_rows: u64,
-}
-
-struct OwnedEvent {
-    event_id: Box<[u8]>,
-    user_id: Box<[u8]>,
-    timestamp: Box<[u8]>,
-    ingest_timestamp: Box<[u8]>,
-    event_type: Box<[u8]>,
-    product_id: Box<[u8]>,
-    price_cents: Box<[u8]>,
-    ingest_ms: i64,
-}
-
-struct OwnedClick {
-    click_id: Box<[u8]>,
-    user_id: Box<[u8]>,
-    campaign_id: Box<[u8]>,
-    timestamp: Box<[u8]>,
-}
-
-fn coalesce_events(
-    batches: &[ParsedBatch<RawEvent>],
-) -> Result<Coalesced<RawEvent>, PipelineError> {
-    let mut rows = Vec::new();
-    let mut winners = HashMap::<Box<[u8]>, OwnedEvent>::new();
-    let mut input_rows = 0_u64;
-    let empty = ByteSpan::new(0, 0).expect("empty span is representable");
-
-    for batch in batches {
-        input_rows = input_rows.saturating_add(to_u64(batch.rows.len()));
-        for outcome in &batch.rows {
-            let row = match outcome {
-                ParseOutcome::Rejected(status) => {
-                    rows.push(ParseOutcome::Rejected(*status));
-                    continue;
-                }
-                ParseOutcome::Accepted(row) => row,
-            };
-            let event_id = resolve(batch, row.event_id, "event event_id")?;
-            if event_id.is_empty() {
-                rows.push(ParseOutcome::Accepted(RawEvent {
-                    event_id: empty,
-                    user_id: empty,
-                    timestamp: empty,
-                    ingest_timestamp: empty,
-                    event_type: empty,
-                    product_id: empty,
-                    price_cents: empty,
-                }));
-                continue;
-            }
-            let ingest_timestamp = resolve(batch, row.ingest_timestamp, "event ingest_ts")?;
-            let ingest_ms = parse_timestamp_ms(ingest_timestamp).ok_or_else(|| {
-                PipelineError::new(
-                    PipelineErrorKind::InputContract,
-                    "parser supplied an invalid event ingest_ts",
-                )
-                .in_phase(Phase::Events)
-            })?;
-            let candidate = OwnedEvent {
-                event_id: event_id.into(),
-                user_id: resolve(batch, row.user_id, "event user_id")?.into(),
-                timestamp: resolve(batch, row.timestamp, "event ts")?.into(),
-                ingest_timestamp: ingest_timestamp.into(),
-                event_type: resolve(batch, row.event_type, "event event_type")?.into(),
-                product_id: resolve(batch, row.product_id, "event product_id")?.into(),
-                price_cents: resolve(batch, row.price_cents, "event price_cents")?.into(),
-                ingest_ms,
-            };
-            match winners.entry(candidate.event_id.clone()) {
-                std::collections::hash_map::Entry::Vacant(entry) => {
-                    entry.insert(candidate);
-                }
-                std::collections::hash_map::Entry::Occupied(mut entry) => {
-                    if candidate.ingest_ms < entry.get().ingest_ms {
-                        entry.insert(candidate);
-                    }
-                }
-            }
-        }
-    }
-
-    let mut arena = Vec::new();
-    for winner in winners.into_values() {
-        rows.push(ParseOutcome::Accepted(RawEvent {
-            event_id: append_field(&mut arena, &winner.event_id, Phase::Events)?,
-            user_id: append_field(&mut arena, &winner.user_id, Phase::Events)?,
-            timestamp: append_field(&mut arena, &winner.timestamp, Phase::Events)?,
-            ingest_timestamp: append_field(&mut arena, &winner.ingest_timestamp, Phase::Events)?,
-            event_type: append_field(&mut arena, &winner.event_type, Phase::Events)?,
-            product_id: append_field(&mut arena, &winner.product_id, Phase::Events)?,
-            price_cents: append_field(&mut arena, &winner.price_cents, Phase::Events)?,
-        }));
-    }
-    Ok(Coalesced {
-        arena,
-        rows,
-        input_rows,
-    })
-}
-
-fn coalesce_clicks(
-    batches: &[ParsedBatch<RawClick>],
-) -> Result<Coalesced<RawClick>, PipelineError> {
-    let mut rows = Vec::new();
-    let mut unique = HashMap::<Box<[u8]>, OwnedClick>::new();
-    let mut input_rows = 0_u64;
-    let empty = ByteSpan::new(0, 0).expect("empty span is representable");
-
-    for batch in batches {
-        input_rows = input_rows.saturating_add(to_u64(batch.rows.len()));
-        for outcome in &batch.rows {
-            let row = match outcome {
-                ParseOutcome::Rejected(status) => {
-                    rows.push(ParseOutcome::Rejected(*status));
-                    continue;
-                }
-                ParseOutcome::Accepted(row) => row,
-            };
-            let click_id = resolve(batch, row.click_id, "click click_id")?;
-            if click_id.is_empty() {
-                rows.push(ParseOutcome::Accepted(RawClick {
-                    click_id: empty,
-                    user_id: empty,
-                    campaign_id: empty,
-                    timestamp: empty,
-                }));
-                continue;
-            }
-            if let std::collections::hash_map::Entry::Vacant(entry) = unique.entry(click_id.into())
-            {
-                entry.insert(OwnedClick {
-                    click_id: click_id.into(),
-                    user_id: resolve(batch, row.user_id, "click user_id")?.into(),
-                    campaign_id: resolve(batch, row.campaign_id, "click campaign_id")?.into(),
-                    timestamp: resolve(batch, row.timestamp, "click timestamp")?.into(),
-                });
-            }
-        }
-    }
-
-    let mut arena = Vec::new();
-    for click in unique.into_values() {
-        rows.push(ParseOutcome::Accepted(RawClick {
-            click_id: append_field(&mut arena, &click.click_id, Phase::Clicks)?,
-            user_id: append_field(&mut arena, &click.user_id, Phase::Clicks)?,
-            campaign_id: append_field(&mut arena, &click.campaign_id, Phase::Clicks)?,
-            timestamp: append_field(&mut arena, &click.timestamp, Phase::Clicks)?,
-        }));
-    }
-    Ok(Coalesced {
-        arena,
-        rows,
-        input_rows,
-    })
-}
-
-fn append_field(
-    arena: &mut Vec<u8>,
-    bytes: &[u8],
-    phase: Phase,
-) -> Result<ByteSpan, PipelineError> {
-    let offset = u32::try_from(arena.len()).map_err(|_| coalesce_limit(phase))?;
-    let length = u32::try_from(bytes.len()).map_err(|_| coalesce_limit(phase))?;
-    let span = ByteSpan::new(offset, length).ok_or_else(|| coalesce_limit(phase))?;
-    arena.extend_from_slice(bytes);
-    Ok(span)
-}
-
-fn coalesce_limit(phase: Phase) -> PipelineError {
-    PipelineError::new(
-        PipelineErrorKind::ResourceLimit,
-        "globally deduplicated rows exceed one 32-bit reducer arena",
-    )
-    .in_phase(phase)
-}
-
 fn register_id(
     id: &[u8],
     identities: &mut IdentityBuilder,
@@ -786,45 +609,4 @@ mod tests {
         assert_eq!(parse_timestamp_ms(b"bad"), None);
     }
 
-    #[test]
-    fn coalescing_deduplicates_globally_across_files() {
-        let root = std::env::temp_dir().join(format!(
-            "shopping-sessions-app-coalesce-{}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap();
-        let first_events = root.join("events-a.csv");
-        let second_events = root.join("events-b.csv");
-        fs::write(
-            &first_events,
-            b"event_id,user_id,ts,ingest_ts,event_type,product_id,price_cents\ne1,later,1000,2026-01-01T00:00:02Z,view,p1,\n",
-        )
-        .unwrap();
-        fs::write(
-            &second_events,
-            b"event_id,user_id,ts,ingest_ts,event_type,product_id,price_cents\ne1,winner,1000,2026-01-01T00:00:01Z,view,p1,\n",
-        )
-        .unwrap();
-        let events =
-            coalesce_events(&parse_events(&[first_events.clone(), second_events.clone()]).unwrap())
-                .unwrap();
-        assert_eq!(events.input_rows, 2);
-        assert_eq!(events.rows.len(), 1);
-        let ParseOutcome::Accepted(event) = &events.rows[0] else {
-            panic!("winner must remain accepted");
-        };
-        assert_eq!(event.user_id.resolve(&events.arena), Some(&b"winner"[..]));
-
-        let first_clicks = root.join("clicks-a.csv");
-        let second_clicks = root.join("clicks-b.csv");
-        let click_body = b"click_id,user_id,campaign_id,ts\nc1,u1,campaign,1000\n";
-        fs::write(&first_clicks, click_body).unwrap();
-        fs::write(&second_clicks, click_body).unwrap();
-        let clicks =
-            coalesce_clicks(&parse_clicks(&[first_clicks, second_clicks]).unwrap()).unwrap();
-        assert_eq!(clicks.input_rows, 2);
-        assert_eq!(clicks.rows.len(), 1);
-        fs::remove_dir_all(root).unwrap();
-    }
 }

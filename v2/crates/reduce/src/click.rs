@@ -103,16 +103,64 @@ pub fn reduce_clicks(
     )
 }
 
+/// Reduces parser segments while retaining one global click-ID deduplication state.
+///
+/// Every row's spans are resolved only against the arena paired with its segment.
+///
+/// # Errors
+///
+/// Returns the same failures as [`reduce_clicks`].
+pub fn reduce_click_segments<'a>(
+    segments: impl IntoIterator<Item = (&'a [u8], &'a [ParseOutcome<RawClick>])>,
+    window_start_ms: i64,
+    window_end_ms: i64,
+    parse_timestamp: impl Fn(&[u8]) -> Option<i64>,
+    identities: &impl Canonicalize,
+    campaigns: &impl ResolveCampaign,
+) -> Result<ClickReduction, PipelineError> {
+    let rows = segments.into_iter().flat_map(|(arena, rows)| {
+        rows.iter().cloned().map(move |outcome| (outcome, arena))
+    });
+    reduce_located_clicks_with_hasher::<RandomState>(
+        rows,
+        window_start_ms,
+        window_end_ms,
+        parse_timestamp,
+        identities,
+        campaigns,
+    )
+}
+
 #[derive(Clone, Copy)]
-struct Candidate {
+struct Candidate<'a> {
     row_index: usize,
     row: RawClick,
+    arena: &'a [u8],
 }
 
 #[allow(clippy::too_many_arguments)]
 fn reduce_clicks_with_hasher<S: BuildHasher + Default>(
     rows: &[ParseOutcome<RawClick>],
     arena: &[u8],
+    window_start_ms: i64,
+    window_end_ms: i64,
+    parse_timestamp: impl Fn(&[u8]) -> Option<i64>,
+    identities: &impl Canonicalize,
+    campaigns: &impl ResolveCampaign,
+) -> Result<ClickReduction, PipelineError> {
+    reduce_located_clicks_with_hasher::<S>(
+        rows.iter().cloned().map(|outcome| (outcome, arena)),
+        window_start_ms,
+        window_end_ms,
+        parse_timestamp,
+        identities,
+        campaigns,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reduce_located_clicks_with_hasher<'a, S: BuildHasher + Default>(
+    rows: impl IntoIterator<Item = (ParseOutcome<RawClick>, &'a [u8])>,
     window_start_ms: i64,
     window_end_ms: i64,
     parse_timestamp: impl Fn(&[u8]) -> Option<i64>,
@@ -134,15 +182,17 @@ fn reduce_clicks_with_hasher<S: BuildHasher + Default>(
         ));
     }
 
-    let mut statuses = vec![RecordStatus::Accepted; rows.len()];
+    let mut statuses = Vec::new();
     let mut candidates = Vec::new();
     let mut seen = HashSet::<Box<[u8]>, S>::with_hasher(S::default());
 
-    for (row_index, outcome) in rows.iter().enumerate() {
+    for (outcome, arena) in rows {
+        let row_index = statuses.len();
+        statuses.push(RecordStatus::Accepted);
         let row = match outcome {
             ParseOutcome::Accepted(row) => row,
             ParseOutcome::Rejected(parse_status) => {
-                statuses[row_index] = RecordStatus::Dropped(DropReason::Parse(*parse_status));
+                statuses[row_index] = RecordStatus::Dropped(DropReason::Parse(parse_status));
                 continue;
             }
         };
@@ -158,7 +208,8 @@ fn reduce_clicks_with_hasher<S: BuildHasher + Default>(
         }
         candidates.push(Candidate {
             row_index,
-            row: *row,
+            row,
+            arena,
         });
     }
 
@@ -172,6 +223,7 @@ fn reduce_clicks_with_hasher<S: BuildHasher + Default>(
 
     for candidate in candidates {
         let row = candidate.row;
+        let arena = candidate.arena;
         let user_id = resolve_span(row.user_id, arena, "user_id")?;
         if user_id.is_empty() {
             statuses[candidate.row_index] = RecordStatus::Dropped(DropReason::EmptyUserId);
@@ -369,6 +421,56 @@ mod tests {
         .unwrap();
 
         assert_eq!(parse_calls.get(), 2, "duplicates must not be validated");
+        assert_eq!(result.batch.records().len(), 2);
+        assert_eq!(result.batch.click_id(0), Some(&b"duplicate"[..]));
+        assert_eq!(result.batch.click_id(1), Some(&b"distinct"[..]));
+        assert_eq!(
+            result.statuses,
+            [
+                RecordStatus::Accepted,
+                RecordStatus::Dropped(DropReason::Duplicate),
+                RecordStatus::Accepted,
+            ]
+        );
+    }
+
+    #[test]
+    fn segmented_arenas_share_one_global_click_deduplication_state() {
+        let mut first_arena = ArenaBuilder::default();
+        let first = first_arena.click(b"duplicate", b"u1", b"c1", b"100000000");
+        let first_rows = [ParseOutcome::Accepted(first)];
+
+        let mut second_arena = ArenaBuilder::default();
+        let duplicate = second_arena.click(b"duplicate", b"u1", b"c1", b"100000000");
+        let distinct = second_arena.click(b"distinct", b"u1", b"c2", b"100000001");
+        let second_rows = [
+            ParseOutcome::Accepted(duplicate),
+            ParseOutcome::Accepted(distinct),
+        ];
+
+        const TINY_ARENA_LIMIT: usize = 48;
+        assert!(first_arena.bytes.len() <= TINY_ARENA_LIMIT);
+        assert!(second_arena.bytes.len() <= TINY_ARENA_LIMIT);
+        assert!(first_arena.bytes.len() + second_arena.bytes.len() > TINY_ARENA_LIMIT);
+
+        let parse_calls = Cell::new(0);
+        let result = reduce_click_segments(
+            [
+                (first_arena.bytes.as_slice(), first_rows.as_slice()),
+                (second_arena.bytes.as_slice(), second_rows.as_slice()),
+            ],
+            700_000_000,
+            800_000_000,
+            |bytes| {
+                parse_calls.set(parse_calls.get() + 1);
+                decimal_timestamp(bytes)
+            },
+            &identities(),
+            &campaigns(),
+        )
+        .unwrap();
+
+        assert_eq!(parse_calls.get(), 2);
         assert_eq!(result.batch.records().len(), 2);
         assert_eq!(result.batch.click_id(0), Some(&b"duplicate"[..]));
         assert_eq!(result.batch.click_id(1), Some(&b"distinct"[..]));

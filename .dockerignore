@@ -1,5 +1,6 @@
 fixtures/
 dev/
 out/
+v2/target/
 *.md
 .git
