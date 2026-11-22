@@ -9,6 +9,7 @@ The runner accepts only a public full 40-character commit SHA and keeps benchmar
 The runner builds the V2 candidate from its requested commit and `v2/Dockerfile`.
 Generator source, all fixture inputs and expected outputs, and the V1 oracle/checker image are independently checked out from the immutable validated baseline `8a35b964aed48ecba5e44d061606b2a4bb9a2239`.
 The runner builds images and the baseline generator outside the timer, verifies all 36 baseline fixtures, checks the complete generated-dataset manifest, and runs the baseline V1 image untimed on that exact dataset to authorize the expected output.
+The untimed oracle has a separate one-hour operational timeout; only the candidate is subject to the fixed 180-second qualification limit.
 It then proves the VM is idle, creates the stopped candidate container, and times from immediately before `docker start -a` through observed exit using the host monotonic clock.
 The candidate container is verified after creation to use linux/amd64, 8 CPUs, 24 GiB memory with equal memory/swap, no network, a read-only root, a 64 MiB `/tmp`, uid/gid 1000, 4096 PIDs, dropped capabilities, no-new-privileges, and the exact `/data`, `/output`, `/scratch`, and environment contract.
 The candidate receives `V2_TELEMETRY_PATH=/scratch/v2-telemetry.json`.
@@ -107,7 +108,7 @@ Failed fixture gates are stored under `results/fixtures-*.json` and suppress mea
 Allowed event tiers are 100K, 1M, 5M, 15M, 30M, and 60M, with clicks fixed at one quarter of events.
 Tier advancement has no human approval step: the next tier is enabled only by a prior result whose machine-verifiable correctness, exact-oracle, telemetry, resource, timing, baseline-provenance, and host-provenance gates all made it `eligible-v2-candidate`.
 The runner automatically refuses advancement after fixture or exact-oracle failure, nonzero exit, timeout, OOM, missing required telemetry or cgroup memory, sampled combined disk at or above 45 GiB, memory at or above 22 GiB, or a linear next-tier projection at or above the fixed 180-second limit.
-Use seeds 1, 2, and 3 only for an eventual 60M release campaign.
+Ordinary tiers require an eligible same-seed predecessor. After the identical candidate SHA completes the seed-1 progression through 30M, seeds 2 and 3 may run directly at 60M; each 60M run still performs its own oracle, correctness, provenance, resource, and eligibility gates.
 Do not describe any run as V2 until an integrated V2 image passes its own full correctness gates.
 
 ## Status, recovery, and cleanup

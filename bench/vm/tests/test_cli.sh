@@ -19,6 +19,7 @@ assert value["oracle_sha"] == value["baseline_sha"]
 assert value["dockerfile"] == "v2/Dockerfile"
 assert value["idle_seconds"] == 5.0
 assert value["timeout_seconds"] == 180.0
+assert value["oracle_timeout_seconds"] > value["timeout_seconds"]
 assert value["container_create"][0:2] == ["docker", "create"]
 assert "V2_TELEMETRY_PATH=/scratch/v2-telemetry.json" in value["container_create"]
 assert "docker start -a" == value["timed_boundary"]

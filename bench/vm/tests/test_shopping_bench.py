@@ -128,7 +128,7 @@ class LockTests(unittest.TestCase):
 
 
 class ResultTests(unittest.TestCase):
-    def result(self):
+    def result(self, *, seed=1, events=100_000):
         return {
             "schema_version": bench.SCHEMA_VERSION, "run_id": "test-run",
             "result_status": "eligible-v2-candidate",
@@ -140,14 +140,15 @@ class ResultTests(unittest.TestCase):
                            "generator_binary_sha256": "2" * 64,
                            "dataset_manifest_sha256": "3" * 64,
                            "oracle_output_manifest_sha256": "6" * 64,
-                           "seed": 1, "events": 100_000, "clicks": 25_000},
+                           "seed": seed, "events": events, "clicks": events // 4},
             "timing": {"class": "warm", "wall_ns": 123},
             "container": {"exit_code": 0, "oom_killed": False},
             "resources": {"memory_peak_bytes": 10, "cpu_usage_usec": 20,
                           "cpu_utilization_percent_of_8": 30.0, "io_read_bytes": 40,
                           "io_write_bytes": 50, "output_peak_allocated_bytes": 60,
                           "scratch_peak_allocated_bytes": 70, "combined_peak_allocated_bytes": 80},
-            "correctness": {"fixtures_passed": 36, "fixtures_total": 36, "self_check": True},
+            "correctness": {"fixtures_passed": 36, "fixtures_total": 36,
+                            "exact_oracle_match": True},
             "telemetry": {"candidate": {}, "artifact": {"sha256": "4" * 64}},
             "parity": {"combined_disk_cap": "monitor-only-no-hard-cap"},
         }
@@ -165,6 +166,7 @@ class ResultTests(unittest.TestCase):
             self.assertEqual(rows[0]["baseline_sha"], bench.BASELINE_SHA)
             self.assertEqual(rows[0]["result_status"], "eligible-v2-candidate")
             self.assertEqual(rows[0]["candidate_telemetry_sha256"], "4" * 64)
+            self.assertEqual(rows[0]["exact_oracle_match"], "true")
             self.assertEqual(rows[0]["wall_ns"], "123")
             self.assertFalse(list((root / "run").glob("*.tmp.*")))
 
@@ -243,6 +245,38 @@ class TelemetryTests(unittest.TestCase):
             self.assertFalse(missing["valid"])
             self.assertFalse(missing["present"])
 
+class OracleTests(unittest.TestCase):
+    def test_trusted_oracle_uses_nonqualification_timeout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "run"
+            output = run_dir / "oracle-output"
+            output.mkdir(parents=True)
+            (output / "part.parquet").write_bytes(b"oracle")
+            process = mock.Mock()
+
+            def wait(timeout):
+                if timeout == bench.TIMEOUT_SECONDS:
+                    raise AssertionError("oracle used candidate qualification timeout")
+                return 0
+
+            process.wait.side_effect = wait
+            state = {"State": {"ExitCode": 0, "OOMKilled": False}}
+            with (
+                mock.patch.object(bench, "create_container", return_value="container"),
+                mock.patch.object(bench.subprocess, "Popen", return_value=process),
+                mock.patch.object(bench, "run", return_value=mock.Mock(stdout=json.dumps([state]))),
+                mock.patch.object(bench, "check_output", return_value={"ok": True}),
+            ):
+                authorized, metadata = bench.trusted_oracle_run(
+                    "oracle-image", root / "data", run_dir, "run-id"
+                )
+            self.assertEqual(authorized, output)
+            process.wait.assert_called_once_with(timeout=bench.ORACLE_TIMEOUT_SECONDS)
+            self.assertEqual(metadata["timeout_seconds"], bench.ORACLE_TIMEOUT_SECONDS)
+            self.assertGreater(bench.ORACLE_TIMEOUT_SECONDS, bench.TIMEOUT_SECONDS)
+
+
 class QualificationTests(unittest.TestCase):
     @staticmethod
     def passing_inputs():
@@ -285,15 +319,37 @@ class QualificationTests(unittest.TestCase):
 
 
 class ProgressiveGateTests(unittest.TestCase):
-    def test_requires_prior_passing_tier(self):
+    def test_ordinary_tiers_require_same_seed_predecessor(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "results").mkdir()
             with self.assertRaises(RuntimeError):
                 bench.ensure_progressive_gate(root, SHA, 1, 1_000_000)
-            result = ResultTests().result()
+            result = ResultTests().result(seed=1, events=100_000)
             bench.finalize_result(root / "run", root / "results/results.csv", result)
             bench.ensure_progressive_gate(root, SHA, 1, 1_000_000)
+            with self.assertRaises(RuntimeError):
+                bench.ensure_progressive_gate(root, SHA, 2, 1_000_000)
+
+    def test_release_seeds_require_full_seed_one_progression(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            index = root / "results/results.csv"
+            for events in bench.TIERS[:-1]:
+                result = ResultTests().result(seed=1, events=events)
+                bench.finalize_result(root / f"run-{events}", index, result)
+            bench.ensure_progressive_gate(root, SHA, 2, 60_000_000)
+            bench.ensure_progressive_gate(root, SHA, 3, 60_000_000)
+            with self.assertRaises(RuntimeError):
+                bench.ensure_progressive_gate(root, SHA, 4, 60_000_000)
+
+    def test_release_seed_rejects_incomplete_seed_one_progression(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = ResultTests().result(seed=1, events=30_000_000)
+            bench.finalize_result(root / "run", root / "results/results.csv", result)
+            with self.assertRaisesRegex(RuntimeError, "predecessor tiers"):
+                bench.ensure_progressive_gate(root, SHA, 2, 60_000_000)
 
 
 class CommandTests(unittest.TestCase):

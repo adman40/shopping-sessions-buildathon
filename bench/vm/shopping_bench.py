@@ -38,6 +38,7 @@ DISK_STOP_BYTES = 45 * 1024**3
 IDLE_SECONDS = 5.0
 TIMEOUT_SECONDS = 180.0
 TIMEOUT_NS = int(TIMEOUT_SECONDS * 1_000_000_000)
+ORACLE_TIMEOUT_SECONDS = 3600.0
 EXPECTED_FIXTURES = 36
 EXPECTED_CPU_MODEL = "Intel(R) Xeon(R) CPU @ 2.80GHz"
 EXPECTED_HOST = {
@@ -59,7 +60,7 @@ CSV_FIELDS = (
     "memory_peak_bytes", "cpu_usage_usec", "cpu_utilization_percent_of_8",
     "io_read_bytes", "io_write_bytes", "output_peak_allocated_bytes",
     "scratch_peak_allocated_bytes", "combined_peak_allocated_bytes",
-    "fixtures_passed", "fixtures_total", "self_check", "disk_cap_parity",
+    "fixtures_passed", "fixtures_total", "exact_oracle_match", "disk_cap_parity",
 )
 
 
@@ -201,7 +202,7 @@ def flatten_result(result: dict[str, Any]) -> dict[str, Any]:
         "scratch_peak_allocated_bytes": resources["scratch_peak_allocated_bytes"],
         "combined_peak_allocated_bytes": resources["combined_peak_allocated_bytes"],
         "fixtures_passed": correctness["fixtures_passed"], "fixtures_total": correctness["fixtures_total"],
-        "self_check": str(correctness["self_check"]).lower(),
+        "exact_oracle_match": str(correctness["exact_oracle_match"]).lower(),
         "disk_cap_parity": result["parity"]["combined_disk_cap"],
     }
 
@@ -890,6 +891,9 @@ def ensure_progressive_gate(root: Path, sha: str, seed: int, events: int) -> Non
     if events == TIERS[0]:
         return
     previous = TIERS[TIERS.index(events) - 1]
+    release_seed = events == TIERS[-1] and seed in (2, 3)
+    predecessor_seed = 1 if release_seed else seed
+    required_events = set(TIERS[:-1]) if release_seed else {previous}
     index = root / "results" / "results.csv"
     if not index.exists():
         raise RuntimeError(f"progressive gate requires an eligible {previous}-event result first")
@@ -899,16 +903,18 @@ def ensure_progressive_gate(root: Path, sha: str, seed: int, events: int) -> Non
             row for row in csv.DictReader(handle)
             if row["git_sha"] == sha
             and row["baseline_sha"] == BASELINE_SHA
-            and int(row["seed"]) == seed
-            and int(row["events"]) == previous
+            and int(row["seed"]) == predecessor_seed
+            and int(row["events"]) in required_events
             and row["result_status"] == "eligible-v2-candidate"
             and row["outcome"] == "pass"
             and row["eligible_timing"] == "true"
-            and row["self_check"] == "true"
+            and row["exact_oracle_match"] == "true"
         ]
-    if not rows:
-        raise RuntimeError(f"progressive gate requires an eligible {previous}-event result first")
-    prior = rows[-1]
+    completed_events = {int(row["events"]) for row in rows}
+    if completed_events != required_events:
+        missing = ", ".join(str(value) for value in sorted(required_events - completed_events))
+        raise RuntimeError(f"progressive gate requires eligible predecessor tiers: {missing}")
+    prior = [row for row in rows if int(row["events"]) == previous][-1]
     memory = int(prior["memory_peak_bytes"] or 0)
     disk = int(prior["combined_peak_allocated_bytes"] or 0)
     if memory <= 0 or memory >= MEMORY_QUALIFY_BYTES:
@@ -941,7 +947,7 @@ def trusted_oracle_run(image_id: str, data: Path, run_dir: Path,
                 ["docker", "start", "-a", container_id], stdout=stdout, stderr=stderr
             )
             try:
-                process.wait(timeout=TIMEOUT_SECONDS)
+                process.wait(timeout=ORACLE_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
                 timed_out = True
                 run(["docker", "kill", container_id], check=False)
@@ -957,6 +963,7 @@ def trusted_oracle_run(image_id: str, data: Path, run_dir: Path,
             "image_id": image_id,
             "container_id": container_id,
             "create_command": create_command,
+            "timeout_seconds": ORACLE_TIMEOUT_SECONDS,
             "exit_code": state["ExitCode"],
             "oom_killed": state["OOMKilled"],
             "output_check": check,
@@ -1057,7 +1064,7 @@ def timed_run(root: Path, candidate_source: Path, baseline_source: Path,
         state = inspect["State"]
         wall_ns = ended_ns - started_ns
         resources = monitor.finish(wall_ns)
-        self_check = check_output(oracle_image_id, output, oracle_output)
+        oracle_comparison = check_output(oracle_image_id, output, oracle_output)
         telemetry, telemetry_artifact = ingest_candidate_telemetry(
             scratch, run_dir, events, clicks
         )
@@ -1069,7 +1076,7 @@ def timed_run(root: Path, candidate_source: Path, baseline_source: Path,
             combined_peak_allocated_bytes=resources["combined_peak_allocated_bytes"],
             disk_threshold_exceeded=monitor.disk_threshold_exceeded,
             fixtures_ok=fixtures["ok"],
-            exact_oracle_match=self_check.get("ok") is True,
+            exact_oracle_match=oracle_comparison.get("ok") is True,
             telemetry_valid=telemetry_artifact["valid"],
         )
         result = {
@@ -1113,9 +1120,8 @@ def timed_run(root: Path, candidate_source: Path, baseline_source: Path,
                 "fixtures_passed": fixtures["passed"], "fixtures_total": fixtures["total"],
                 "fixture_gate": fixtures["ok"],
                 "trusted_oracle_gate": oracle["output_check"].get("ok") is True,
-                "exact_oracle_match": self_check.get("ok") is True,
-                "self_check": self_check.get("ok") is True,
-                "self_check_details": self_check,
+                "exact_oracle_match": oracle_comparison.get("ok") is True,
+                "exact_oracle_match_details": oracle_comparison,
                 "telemetry_gate": telemetry_artifact["valid"],
             },
             "telemetry": {"candidate": telemetry, "artifact": telemetry_artifact},
@@ -1236,7 +1242,9 @@ def plan(args: argparse.Namespace) -> int:
         "fixtures_sha": BASELINE_SHA, "oracle_sha": BASELINE_SHA,
         "dockerfile": "v2/Dockerfile", "events": args.events,
         "clicks": args.clicks, "idle_seconds": IDLE_SECONDS,
-        "timeout_seconds": TIMEOUT_SECONDS, "container_create": command,
+        "timeout_seconds": TIMEOUT_SECONDS,
+        "oracle_timeout_seconds": ORACLE_TIMEOUT_SECONDS,
+        "container_create": command,
         "timed_boundary": "docker start -a",
     }, indent=2))
     return 0
