@@ -51,14 +51,19 @@ class ScratchMonitor:
 
 def tree_size(root: Path) -> int:
     total = 0
-    try:
-        paths = list(root.rglob("*"))
-    except OSError:
-        return total
-    for path in paths:
+    # Consume file entries lazily and retain only directories still to visit.
+    pending = [os.fspath(root)]
+    while pending:
         try:
-            if path.is_file() and not path.is_symlink():
-                total += path.stat().st_size
+            with os.scandir(pending.pop()) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                        elif entry.is_dir(follow_symlinks=False):
+                            pending.append(entry.path)
+                    except OSError:
+                        pass
         except OSError:
             pass
     return total

@@ -19,6 +19,7 @@ Workspace manifests were merged semantically and `v2/Cargo.lock` was regenerated
 | Slice 6 output | `df6647e4b5f2c7ef4e8b8faf09dfdc743cb8fe29` | `4c1e91ace43b61a97655c29fed80f22f14b53b8f` |
 | Application and validation wiring | `7ca5c727ab35cbda722eb8b3e4cd99960b3f0911` | same commit |
 | Multi-arena orchestration, telemetry, and physical schema completion | `716ad4dffc547c9a531a3cc00ca02eb3e11fae2f` | same commit |
+| Harness observer optimization and equivalence tests | `afc6fce7b6965e8ac556b32f35561e39506f3b71` | same commit |
 
 ## Qualification caveats
 
@@ -28,5 +29,6 @@ Its `linux/amd64` release-image build also exceeded its 1,200-second dependency-
 
 The integrated candidate's exact scorer-facing root Dockerfile subsequently produced a `linux/amd64` release image in 114 seconds.
 That image passed all 36 fixtures, all 10 randomized differential seeds, exact practical 1M output, physical schema validation, deterministic repeat, timed-run correctness, and telemetry validation.
-The integrated harness still refused timing publication because measured observer overhead was `0.5177%`, above the unchanged strict `0.5000%` ceiling.
-The historical shadow failures and the integrated overhead refusal remain disclosed rather than represented as green results.
+Before the observer optimization, the integrated harness also refused timing publication at `0.5177%` overhead.
+After integrating `afc6fce7b6965e8ac556b32f35561e39506f3b71`, its equivalence tests passed and the exact root-image harness passed with `0.2776%` observer overhead, strictly below the unchanged `0.5000%` ceiling.
+The historical shadow timeout and both earlier overhead refusals remain disclosed rather than retrospectively represented as green results.
